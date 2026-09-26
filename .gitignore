@@ -1,0 +1,18 @@
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Node
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+
+# Release asset: built locally with `npm pack` and attached to a GitHub
+# release. It is a packaging of this same source, so committing it would only
+# create a second copy that can drift.
+plugin.tgz
+*.tgz
+
+# Screenshots taken while checking the panel in the browser
+screenshots/

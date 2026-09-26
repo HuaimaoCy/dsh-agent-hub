@@ -1,0 +1,19 @@
+# Bundle layer for dsh-agent-hub: inserts this plugin into the host composition
+# once the package is added to a profile (`dsh plugin --profile web add <dir>`).
+#
+# Every option below is optional; the plugin's own normalizer fills the defaults
+# and rejects a wrong type loudly, so a bad edit here fails at load rather than
+# silently changing behaviour.
+- insert:
+    - id: agent-hub
+      name: 'dsh-agent-hub'
+      config:
+        # Subagent provider that composes the children. Left empty the plugin
+        # picks the first provider the runtime reports (normally `spawn`).
+        provider: ''
+        # Hard ceiling for one launch; also the server-side check behind the UI's
+        # own limit. Keep it at or below the runtime's maxActiveSubagents.
+        maxAgents: 8
+        # Powers a draft row starts with when the coordinator does not say.
+        defaultWrite: true
+        defaultShell: false

@@ -1,0 +1,6 @@
+# One line ending everywhere: the repository stores LF so a clone on any
+# platform gets the same bytes. Both halves are loaded as source by the shell —
+# the browser half is fetched as an artifact and its cache revision is derived
+# from the file's mtime, ctime and size — so byte-stable checkouts keep the
+# plugin's own tests (which assert the Chinese strings are intact) honest.
+* text=auto eol=lf
