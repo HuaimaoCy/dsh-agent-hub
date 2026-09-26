@@ -42,6 +42,18 @@
 
 `status` 含义：`draft` 未启动（可编辑）；`queued` 已提交启动；`running` 正在跑；`idle` 已启动但当前空闲（可被唤醒）；`done`/`error`/`stopped` 终态。
 
+### LeadCard（`result.lead`）
+
+主智能体也在板上——它确实在干活，一块只列别人、不列"正在跟你说话的那个"的板会歪曲团队的构成。它与 AgentCard 同形，另有：
+
+- `clientId` 恒为 `"lead"`，`origin` 恒为 `"lead"`，`id` 就是父会话 id；
+- `status` 与 `model` 在**取快照时**从活的 Agent 读取（`agent.status`、`agent.options`，回退到会话路由），而不是从事件折叠——Agent 在第一轮之前就存在，而且这两者变化时不一定有会话事件；
+- 其余字段（`activity` / `output` / `live` / `usage` / `toolCalls`）由**父会话自己的**会话事件折叠而来。
+
+**它刻意不在 `agents` 数组里。** 那个数组是"可以派发、可以插话/唤醒/中断"的名册：把主智能体放进去，`launch` 会把它当旧名册替换掉、`stopAll` 会去中断你正在说话的对话、界面的分工编辑器会把它当成一条可编辑的草案行。所以界面把它作为**第一条泳道**单独渲染，并且不提供动作按钮——你不会去中断自己。
+
+更深的后代（协作台的智能体自己再派出去的帮手）属于同一块台，但它们的会话事件**不会**折叠进主智能体：那不是主智能体的产出。
+
 `output` 与 `live` 的分工很重要：`output` 只装**已提交**的步骤输出，`live` 装当前这一步正在生成的增量；`assistant/message` 提交时 `live` 清空、其文本进入 `output`。界面应把 `live` 用不同样式接在 `output` 之后，而不是把它当历史。
 
 ### FeedItem
@@ -86,6 +98,7 @@
     "objective": "…",
     "phase": "idle|planned|running|done",   // idle 无草案；planned 有草案未跑；running 有在跑；done 全部终态
     "agents": [AgentCard],
+    "lead": AgentCard,           // 这个对话自己的智能体。**不在 `agents` 里**（见下）
     "feed": [FeedItem],          // 最近 200 条，最旧在前
     "team": {                    // DSH 原生 Agent Teams 的状态：**读**出来而不是镜像
       "available": true,         // 该部署是否组合了 agentTeams 服务
@@ -139,6 +152,7 @@ data: {"sessionId":"…","agents":[…],"feed":[…],"phase":"running"}
 |---|---|---|
 | `snapshot` | 与 `op=state` 的 result 同形 | 连接建立时立刻发一次 |
 | `agent` | 完整 AgentCard（覆盖式，不是补丁） | 某智能体状态/输出/用量变化（服务端按 ≥150ms 合并；逐 token 增量也走这一帧） |
+| `lead` | 完整 LeadCard（覆盖式） | 主智能体自己的变化。**独立事件**，客户端不得把它并进 `agents` |
 | `feed` | 单个 FeedItem | 新增一条进度或消息 |
 | `board` | `{ sessionId, objective, phase, teamWarning? }` | 草案/阶段变化；`teamWarning` 只携带桥接写失败，客户端应**合并**进上一次团队快照而不是覆盖 |
 | `heartbeat` | `{ now }` | 每 15 秒 |

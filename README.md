@@ -180,6 +180,25 @@ Two ways to close it, neither implemented:
   into a permanent `failure`** where no further event applies. That is not a cost a
   third-party plugin should impose on someone else's session, so it is not used.
 
+## The lead is on the board too
+
+It does a share of the work — the policy tells it to "get on with your own share" —
+so it is the **first lane**: status, model, current step, output tail and token
+usage, exactly like a dispatched agent.
+
+It is **not** in the dispatchable roster, though. That array is the set you can
+steer, wake and interrupt, and putting the lead in it would have three
+consequences: a re-launch would replace it as a stale roster, **"stop all" would
+interrupt the conversation you are talking in**, and the plan editor would offer it
+as an editable draft row. So it lives in the Host's `state.lead`, travels on its own
+`lead` event, and renders as a lane with **no action bar** — you do not interrupt
+yourself.
+
+Its events are attributed by the same rule: **the parent conversation's own** session
+events (tool calls, replies, usage) fold into its card, while a deeper descendant — a
+helper one of our agents started — is on the same board but its output is **not**
+credited to the lead.
+
 ## Visibility: one board, and only one
 
 **An agent sees the summaries of the agents on its own conversation's board, and

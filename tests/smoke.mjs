@@ -80,6 +80,10 @@ const state = {
 /** Parent session route the hub falls back to. */
 const parentAgent = {
   id: 'session-parent',
+  // The live agent's own status and route, which the lead card prefers over
+  // anything folded from events.
+  status: 'running',
+  options: { provider: 'deepseek-official', model: 'deepseek-flash' },
   session: {
     id: 'session-parent',
     requestHeader: () => ({ config: { provider: 'deepseek-official', model: 'deepseek-flash' } }),
@@ -1128,6 +1132,76 @@ await check('路由缓存冷启动会自愈（否则 lead 永远看不到可选�
   await wait(80)
   assert.ok(fresh.routesSync().length > 0, 'the next assembly must already have the routes')
   assert.match(hubPolicyText(fresh, { agent: { session: { id: sessionId } } }), /可用模型路由/)
+})
+
+console.log('\n主智能体也在板上')
+await check('state 带出主智能体，状态与模型取自活的 Agent', async () => {
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const lead = response.payload.result.lead
+  assert.equal(lead.id, sessionId)
+  assert.equal(lead.origin, 'lead')
+  assert.equal(lead.clientId, 'lead')
+  assert.equal(lead.status, 'running', 'the live agent status is authoritative')
+  assert.equal(lead.model.provider, 'deepseek-official')
+  assert.equal(lead.model.model, 'deepseek-flash')
+})
+await check('主智能体不在可派发名册里', async () => {
+  // It lives outside `agents` on purpose: inside, a re-launch would replace it,
+  // `stopAll` would interrupt the conversation you are talking in, and the plan
+  // editor would offer it as a draft row.
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  assert.equal(response.payload.result.agents.some(card => card.origin === 'lead'), false)
+  assert.equal(response.payload.result.agents.some(card => card.id === sessionId), false)
+  assert.equal(response.payload.result.agents.some(card => card.clientId === 'lead'), false)
+})
+await check('主智能体自己的会话事件折进它自己的卡片', async () => {
+  const before = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const agentCount = before.payload.result.agents.length
+  sessionEvent({ id: sessionId }, {
+    type: 'tool/call', seq: 60, data: { turn: 1, step: 1, callId: 'c60', name: 'read', arguments: '{"path":"src/team.js"}' },
+  })
+  // Read between the two events: the committed message that follows replaces the
+  // activity line, so asserting afterwards would be asserting about the wrong step.
+  const during = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  assert.match(during.payload.result.lead.activity, /src\/team\.js/)
+  sessionEvent({ id: sessionId }, {
+    type: 'assistant/message', seq: 61,
+    data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '活已经派出去了。' }] }, usage: { inputTokens: 3, outputTokens: 4 } },
+  })
+  const after = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  assert.match(after.payload.result.lead.output, /活已经派出去了/)
+  assert.deepEqual(after.payload.result.lead.usage, { input: 3, output: 4 })
+  assert.equal(after.payload.result.agents.length, agentCount, 'the lead\'s work must not be attributed to a dispatched agent')
+})
+await check('更深的后代的事件不会算到主智能体头上', async () => {
+  // A subagent that one of our agents started is on the same board, but its work
+  // is not the lead's work — folding it in would attribute a stranger's output to
+  // the conversation.
+  sessionEvent({ id: 'child-x-1' }, {
+    type: 'assistant/message', seq: 62, data: { turn: 9, step: 1, message: { content: [{ type: 'text', text: '孙子的输出' }] } },
+  })
+  const after = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  assert.ok(!after.payload.result.lead.output.includes('孙子的输出'))
+})
+await check('主智能体的增量走独立的 lead 帧，不混进 agent 帧', async () => {
+  const res = streamResponse()
+  await route.handler(streamRequest(sessionId), res)
+  const before = res.chunks.length
+  harness.handlers.get('agent/assistant-stream')({
+    agent: { id: sessionId },
+    frame: { type: 'chunk', attemptId: 'a', revision: 1, index: 0, time: 1, chunk: { type: 'text-delta', text: '正在想' } },
+  })
+  await wait(260)
+  const frames = framesOf(res.chunks.slice(before))
+  const leadFrame = frames.find(frame => frame.event === 'lead')
+  assert.ok(leadFrame !== undefined, 'the lead must arrive on its own event')
+  assert.equal(leadFrame.data.clientId, 'lead')
+  assert.equal(frames.some(frame => frame.event === 'agent'), false, 'a lead frame must never masquerade as a dispatched agent')
+})
+await check('hub_read 里也报出主智能体', async () => {
+  const tool = harness.tools.registered.get('hub_read')
+  const text = await tool.execute({}, { agent: { session: { id: sessionId } } })
+  assert.match(text, /主智能体/)
 })
 
 console.log('\n实时流')

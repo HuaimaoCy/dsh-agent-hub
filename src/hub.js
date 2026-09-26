@@ -225,6 +225,33 @@ export class Hub {
         feedSeq: 0,
         createdAt: Date.now(),
         updatedAt: Date.now(),
+        // The conversation's own agent is on the board too. It is kept **outside**
+        // `agents` on purpose: that array is the roster you launch from and steer
+        // through, and putting the lead in it would make `launch` replace it, make
+        // `stopAll` interrupt the conversation you are talking in, and make it
+        // appear as an editable draft row.
+        lead: {
+          clientId: 'lead',
+          id: key,
+          origin: 'lead',
+          name: '主智能体',
+          role: 'lead',
+          task: '',
+          files: [],
+          powers: { read: true, write: true, shell: true, message: true },
+          status: 'idle',
+          activity: '',
+          output: '',
+          live: '',
+          usage: { input: 0, output: 0 },
+          toolCalls: 0,
+          createdAt: Date.now(),
+          startedAt: null,
+          endedAt: null,
+          lastActivityAt: 0,
+          lastToolFeedAt: 0,
+          error: null,
+        },
       }
       this.#boards.set(key, board)
     }
@@ -264,6 +291,8 @@ export class Hub {
       objective: board.objective,
       phase: phaseOf(board),
       agents: board.agents.map(card => ({ ...card })),
+      // The conversation's own agent, kept out of `agents` (see `board()`).
+      lead: this.#leadView(board),
       feed: board.feed.map(item => ({ ...item })),
       // The durable half of the integration: the harness's own Agent Teams state,
       // read rather than mirrored, so one board can show both rosters.
@@ -832,6 +861,9 @@ export class Hub {
       you: card === null
         ? { name: this.#speakerName(board, senderSessionId, card), task: board.objective }
         : { name: card.name, task: card.task, files: card.files },
+      // The conversation's own agent, so a dispatched agent knows who is working
+      // beside it rather than assuming the board is the whole team.
+      lead: this.#leadView(board),
       roster: board.agents.map(agent => ({
         name: agent.name,
         role: agent.role,
@@ -860,8 +892,8 @@ export class Hub {
    * @returns {void}
    */
   noteSessionEvent(session, event) {
-    const located = this.#locate(session?.id)
-    if (located === null || located.card === null) return
+    const located = this.#progressTarget(session?.id)
+    if (located === null) return
     const { board, card } = located
     const data = event?.data ?? {}
     const now = Date.now()
@@ -946,8 +978,8 @@ export class Hub {
    * @returns {void}
    */
   noteAssistantStream(agent, frame) {
-    const located = this.#locate(agent?.id)
-    if (located === null || located.card === null) return
+    const located = this.#progressTarget(agent?.id)
+    if (located === null) return
     const { board, card } = located
     if (frame?.type === 'start') {
       card.live = ''
@@ -976,8 +1008,8 @@ export class Hub {
    * @returns {void}
    */
   noteAgentStatus(payload) {
-    const located = this.#locate(payload?.agent?.id)
-    if (located === null || located.card === null) return
+    const located = this.#progressTarget(payload?.agent?.id)
+    if (located === null) return
     const { board, card } = located
     const status = payload?.status ?? payload?.agent?.status
     if (status === 'running') {
@@ -1260,7 +1292,58 @@ export class Hub {
 
   /** Emit one card immediately; used for state changes a human is waiting on. */
   #emitAgent(sessionId, card) {
-    this.#emit(sessionId, 'agent', { ...card })
+    const board = this.#boards.get(sessionId)
+    // The conversation's own card travels on its own event, because the client
+    // must keep it out of the roster it builds launch payloads from and steers
+    // through — merging it into `agents` would make it an editable draft row.
+    const event = board !== undefined && card === board.lead ? 'lead' : 'agent'
+    this.#emit(sessionId, event, { ...card })
+  }
+
+  /**
+   * The card an event belongs to: a dispatched child's, or the conversation's own.
+   *
+   * The lead is on the board because it does a share of the work, and a board that
+   * lists everyone except the agent the user is talking to misrepresents the team.
+   * A deeper descendant (a subagent one of our agents started) is deliberately not
+   * folded into the lead: its work is not the lead's work.
+   * @param {string} sessionId - Session the event came from.
+   * @returns {{ board: Record<string, any>, card: Record<string, any> }|null} Target, or null.
+   */
+  #progressTarget(sessionId) {
+    const located = this.#locate(sessionId)
+    if (located === null) return null
+    if (located.card !== null) return { board: located.board, card: located.card }
+    if (sessionId !== located.board.sessionId) return null
+    return { board: located.board, card: located.board.lead }
+  }
+
+  /**
+   * The conversation's card, enriched with what only the live Agent knows.
+   *
+   * Status and route are read at snapshot time rather than folded from events:
+   * the agent exists before any turn, and both change without a session event.
+   * @param {Record<string, any>} board - The board.
+   * @returns {Record<string, any>} Lead card for the wire.
+   */
+  #leadView(board) {
+    const lead = board.lead
+    const agent = this.ctx.get?.('agents')?.get?.(board.sessionId)
+    const options = agent?.options ?? {}
+    const route = agent?.session?.requestHeader?.()?.config ?? {}
+    return {
+      ...lead,
+      status: agent === undefined || agent === null
+        ? lead.status
+        : (agent.status === 'running' ? 'running' : 'idle'),
+      model: {
+        provider: typeof options.provider === 'string' ? options.provider
+          : (typeof route.provider === 'string' ? route.provider : ''),
+        model: typeof options.model === 'string' ? options.model
+          : (typeof route.model === 'string' ? route.model : ''),
+        reasoningEffort: typeof options.reasoningEffort === 'string' ? options.reasoningEffort : null,
+      },
+    }
   }
 
   /** Coalesce card frames for high-frequency updates. */
@@ -1280,7 +1363,9 @@ export class Hub {
       const board = this.#boards.get(sessionId)
       if (board === undefined) return
       for (const clientId of pending) {
-        const found = board.agents.find(agent => agent.clientId === clientId)
+        const found = clientId === 'lead'
+          ? board.lead
+          : board.agents.find(agent => agent.clientId === clientId)
         if (found !== undefined) this.#emitAgent(sessionId, found)
       }
     }, FRAME_COALESCE_MS)

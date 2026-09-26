@@ -241,6 +241,21 @@ await check('board 帧只更新告警，不会抹掉团队快照', () => {
   assert.equal(warned.team.members.length, 2, 'a warning must not blank the roster')
   assert.equal(warned.team.tasks.length, 1)
 })
+await check('主智能体也随同一次快照到达界面', () => {
+  const state = helpers.applyStreamEvent(helpers.emptyState(sessionId), 'snapshot', hostState)
+  assert.equal(state.lead.id, sessionId)
+  assert.equal(state.lead.origin, 'lead')
+  assert.equal(state.lead.clientId, 'lead')
+  assert.equal(state.lead.model.provider, 'deepseek-official', 'the lead carries its route so its lane can show it')
+})
+await check('lead 帧只更新主智能体，不会混进可派发名册', () => {
+  const state = helpers.applyStreamEvent(helpers.emptyState(sessionId), 'snapshot', hostState)
+  const next = helpers.applyStreamEvent(state, 'lead', { ...state.lead, activity: '正在读文件' })
+  assert.equal(next.lead.activity, '正在读文件')
+  assert.equal(next.agents.length, state.agents.length, 'a lead frame must never add a roster row')
+  assert.equal(next.agents.some(card => card.clientId === 'lead'), false)
+  assert.equal(state.lead.activity, '', 'the previous state must not be mutated')
+})
 await check('宿主发出的每个 status 浏览器半都有色调与文案', () => {
   // The union the Host half can produce, spelled out here on purpose: adding a
   // status host-side without teaching the panel about it is exactly the break

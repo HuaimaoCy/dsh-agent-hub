@@ -96,6 +96,11 @@ function hubReadTool(hub) {
 export function formatBoard(view) {
   const lines = [`目标：${view.objective === '' ? '（未声明）' : view.objective}`]
   lines.push(`你：${view.you.name}${view.you.task === undefined ? '' : ` — ${view.you.task}`}`)
+  if (view.lead !== undefined && view.lead !== null) {
+    lines.push(`主智能体（${view.lead.status}）`
+      + `${view.lead.model?.model ? ` · ${view.lead.model.provider}/${view.lead.model.model}` : ''}`
+      + `${view.lead.activity === '' ? '' : ` · ${view.lead.activity}`}`)
+  }
   lines.push('', '队友：')
   for (const member of view.roster) {
     lines.push(`- ${member.name}（${member.status}）${member.role === '' ? '' : ` ${member.role}`}`

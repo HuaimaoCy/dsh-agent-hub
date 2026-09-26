@@ -129,6 +129,7 @@ window.__ModuleLoader__.load({
         delivery: '投递方式', deliveryQueue: '排队', deliverySteer: '立即插话',
         deliveryHint: '排队等它当前一步结束；立即插话会打断当前推理。',
         wake: '唤醒', interrupt: '中断', unavailableDraft: '智能体还没启动，这个操作不可用。',
+        leadNote: '主智能体 · 就在这个对话里',
         feed: '进度板', feedEmpty: '还没有进度。', feedAll: '全体',
         teamBoard: '原生团队', teamCounts: '{a} 个成员 · {b} 个待办',
         teamNoTasks: '原生任务板上没有待办。', taskActive: '进行中', taskPending: '待办',
@@ -175,6 +176,7 @@ window.__ModuleLoader__.load({
         delivery: 'Delivery', deliveryQueue: 'Queue', deliverySteer: 'Interrupt now',
         deliveryHint: 'Queueing waits for the current step; interrupting cuts into the running turn.',
         wake: 'Wake', interrupt: 'Interrupt', unavailableDraft: 'This agent has not started, so the action is unavailable.',
+        leadNote: 'the lead agent · in this conversation',
         feed: 'Progress', feedEmpty: 'Nothing has happened yet.', feedAll: 'everyone',
         teamBoard: 'Agent Teams', teamCounts: '{a} members · {b} open tasks',
         teamNoTasks: 'No open tasks on the team board.', taskActive: 'in progress', taskPending: 'pending',
@@ -216,6 +218,8 @@ window.__ModuleLoader__.load({
         // "no snapshot yet", which the panel keeps distinct from a readable-but-empty
         // team.
         team: null,
+        // The conversation's own agent, which the Host half keeps out of `agents`.
+        lead: null,
         now: 0,
       }
     }
@@ -287,12 +291,17 @@ window.__ModuleLoader__.load({
             providers: Array.isArray(payload.providers) ? payload.providers : (base.providers ?? []),
             hasLLM: payload.hasLLM === undefined ? base.hasLLM === true : payload.hasLLM === true,
             team: payload.team === undefined || payload.team === null ? (base.team ?? null) : payload.team,
+            lead: payload.lead === undefined || payload.lead === null ? (base.lead ?? null) : payload.lead,
             now,
           }
         case 'agent':
           return { ...base, agents: mergeAgent(base.agents, payload), now }
         case 'feed':
           return { ...base, feed: appendFeed(base.feed, payload), now }
+        case 'lead':
+          // The conversation's own card. It travels on its own event so a client
+          // can never mistake it for something it may launch or steer.
+          return { ...base, lead: payload, now }
         case 'board': {
           const next = { ...base, now }
           if (typeof payload.objective === 'string') next.objective = payload.objective
@@ -892,7 +901,7 @@ window.__ModuleLoader__.load({
      * One agent lane: identity and status in the head, the current action, the plain-text output tail, and
      * the three things a human can do to a running agent.
      */
-    function AgentLane({ card, now, open, busy, onToggle, onAction, onSteer, t }) {
+    function AgentLane({ card, now, open, busy, onToggle, onAction, onSteer, readonly, t }) {
       const status = String(card?.status ?? '')
       const steerable = status !== 'draft'
       const outputRef = React.useRef(null)
@@ -1027,21 +1036,27 @@ window.__ModuleLoader__.load({
             h(Button, { size: 'sm', onClick: () => { setSteerOpen(false); setSteerText('') } }, t('steerCancel')),
           ),
         ),
-        h('div', { className: 'dsah-bar' },
-          h(Button, {
-            size: 'sm', icon: h(IconPaperPlaneOutlineMedium, null), disabled: steerable !== true || busy,
-            title: steerable === true ? t('steer') : t('unavailableDraft'),
-            onClick: () => { setSteerOpen(true) },
-          }, t('steer')),
-          h(Button, {
-            size: 'sm', icon: h(IconSparkleMedium, null), disabled: steerable !== true || busy,
-            title: steerable === true ? t('wake') : t('unavailableDraft'), onClick: action('agent.wake'),
-          }, t('wake')),
-          h(Button, {
-            size: 'sm', icon: h(IconStopFillMedium, null), disabled: steerable !== true || busy,
-            title: steerable === true ? t('interrupt') : t('unavailableDraft'), onClick: action('interrupt'),
-          }, t('interrupt')),
-        ),
+        // The conversation's own lane has no action bar: the three controls steer,
+        // wake and interrupt *dispatched* agents, and none of them means anything
+        // for the agent you are already talking to. "Interrupt yourself" is not an
+        // action a board should offer, so the row is replaced rather than disabled.
+        readonly === true
+          ? h('div', { className: 'dsah-bar' }, h('span', { className: 'dsah-cap' }, t('leadNote')))
+          : h('div', { className: 'dsah-bar' },
+              h(Button, {
+                size: 'sm', icon: h(IconPaperPlaneOutlineMedium, null), disabled: steerable !== true || busy,
+                title: steerable === true ? t('steer') : t('unavailableDraft'),
+                onClick: () => { setSteerOpen(true) },
+              }, t('steer')),
+              h(Button, {
+                size: 'sm', icon: h(IconSparkleMedium, null), disabled: steerable !== true || busy,
+                title: steerable === true ? t('wake') : t('unavailableDraft'), onClick: action('agent.wake'),
+              }, t('wake')),
+              h(Button, {
+                size: 'sm', icon: h(IconStopFillMedium, null), disabled: steerable !== true || busy,
+                title: steerable === true ? t('interrupt') : t('unavailableDraft'), onClick: action('interrupt'),
+              }, t('interrupt')),
+            ),
       )
     }
 
@@ -1597,6 +1612,15 @@ window.__ModuleLoader__.load({
       )
 
       const lanes = h('div', { className: 'dsah-lanes' },
+        // The lead comes first: the board reads as "this conversation's agent, and
+        // the agents it put to work", which is what it is.
+        ...(state.lead === null || state.lead === undefined
+          ? []
+          : [h(AgentLane, {
+              key: 'lead', card: state.lead, now, t, busy: false, readonly: true,
+              open: openRows.lead === true, onToggle: toggleRow,
+              onAction: () => {}, onSteer: () => {},
+            })]),
         ...state.agents.map(card => h(AgentLane, {
           key: identityOf(card), card, now, t, busy: board.busy,
           open: openRows[identityOf(card)] === true,
