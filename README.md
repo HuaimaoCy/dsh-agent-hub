@@ -150,6 +150,31 @@ Two ways to close it, neither implemented:
   into a permanent `failure`** where no further event applies. That is not a cost a
   third-party plugin should impose on someone else's session, so it is not used.
 
+## Visibility: one board, and only one
+
+**An agent sees the summaries of the agents on its own conversation's board, and
+nothing else.** Another conversation's board is invisible to it. The boundary is
+enforced in code, not by convention:
+
+- **A board belongs to a conversation.** Any subagent of that conversation — down
+  to a subagent's own subagent — resolves to the same board, so it reads the same
+  peers: names, roles, status, latest progress.
+- **Conversations do not see each other.** B's board never appears in A's reads.
+- **A subagent cannot open or clear a board** (409). It is already a subagent of a
+  conversation and works with the peers on that board; `hub_read` to look,
+  `hub_post` to report.
+
+> Why this had to be code: a child session's `session.id` is its own. Without
+> resolution, a subagent calling launch would allocate a **second board keyed by
+> its own id**, and from that moment its `hub_read` would return that empty board
+> instead of the team it is working with — the roster would fragment **silently**,
+> with no error anywhere. So "a board belongs to a conversation" is a resolution
+> rule, not a sentence in a prompt.
+
+An agent whose card was replaced loses access with it: after a re-launch or a
+cleared board, a stale child reporting in gets "not on any board" rather than
+writing into an unfamiliar empty one.
+
 ## Status semantics
 
 | Status | Meaning |

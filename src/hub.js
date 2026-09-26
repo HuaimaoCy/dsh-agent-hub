@@ -140,15 +140,63 @@ export class Hub {
   }
 
   /**
+   * The conversation a session's board belongs to.
+   *
+   * A board belongs to a conversation, never to one of its subagents, so a
+   * subagent session resolves upward to the root it descends from. Without this, a
+   * subagent that touched any operation keyed by its own id would allocate a
+   * **second** board, and `hub_read` would then resolve to that empty board
+   * instead of the team it is working with: the roster would silently fragment and
+   * the one guarantee this feature makes — you see the board you are on, and only
+   * that one — would stop being true.
+   *
+   * The walk is bounded because a malformed lineage must not become an infinite
+   * loop in a function called on every frame.
+   * @param {string} sessionId - Any session id, root or subagent.
+   * @returns {string} The owning conversation's id.
+   */
+  #boardSessionOf(sessionId) {
+    let current = sessionId
+    for (let depth = 0; depth < 8; depth += 1) {
+      const agent = this.ctx.get?.('agents')?.get?.(current)
+      const parent = agent?.session?.header?.parentSession
+      if (typeof parent !== 'string' || parent === '') return current
+      current = parent
+    }
+    return current
+  }
+
+  /**
+   * Refuse to let a subagent own a board of its own.
+   *
+   * Ownership is the three verbs that *create or destroy* a board. Reads and
+   * deliveries resolve to the conversation's board instead, so a subagent works
+   * with its teammates; a launch would instead replace the roster its teammates
+   * live in.
+   * @param {string} sessionId - Session attempting the operation.
+   * @returns {void}
+   * @throws {HubError} 409 when the caller is a subagent.
+   */
+  #assertBoardOwner(sessionId) {
+    if (this.#boardSessionOf(sessionId) === sessionId) return
+    throw new HubError(
+      409,
+      '子智能体不能自己开台或清台：你已经是某个会话的子智能体，只能与你所属会话那块台上的同伴协作。'
+      + '要看同伴的进度用 hub_read，要汇报用 hub_post。',
+    )
+  }
+
+  /**
    * Board backing one session, created empty on first use.
-   * @param {string} sessionId - Parent session id.
+   * @param {string} sessionId - Parent session id, or any of its subagents.
    * @returns {Record<string, any>} The board.
    */
   board(sessionId) {
-    let board = this.#boards.get(sessionId)
+    const key = this.#boardSessionOf(sessionId)
+    let board = this.#boards.get(key)
     if (board === undefined) {
       board = {
-        sessionId,
+        sessionId: key,
         objective: '',
         agents: [],
         feed: [],
@@ -156,7 +204,7 @@ export class Hub {
         createdAt: Date.now(),
         updatedAt: Date.now(),
       }
-      this.#boards.set(sessionId, board)
+      this.#boards.set(key, board)
     }
     return board
   }
@@ -167,11 +215,11 @@ export class Hub {
    * `board()` allocates on demand, which is right for a request that is about to
    * write. A prompt section asking "is there a board here" runs on every request
    * of every session, so it must not be able to allocate one.
-   * @param {string} sessionId - Parent session id.
+   * @param {string} sessionId - Parent session id, or any of its subagents.
    * @returns {Record<string, any>|undefined} The board, when the session has one.
    */
   peek(sessionId) {
-    return this.#boards.get(sessionId)
+    return this.#boards.get(this.#boardSessionOf(sessionId))
   }
 
   /**
@@ -181,10 +229,16 @@ export class Hub {
    */
   state(sessionId) {
     const board = this.board(sessionId)
-    const team = readTeam(this.ctx, this.ctx.get?.('agents')?.get?.(sessionId))
+    // The team is read for the *conversation*, not for whichever session asked:
+    // a subagent's team identity is its own by construction (`tryMembership`
+    // returns undefined for a subagent), so reading it for the child id would
+    // report an empty team beside a full board.
+    const team = readTeam(this.ctx, this.ctx.get?.('agents')?.get?.(board.sessionId))
     if (board.teamWarning !== undefined && board.teamWarning !== null) team.warning = board.teamWarning
     return {
-      sessionId,
+      // The resolved owner, so a caller that passed a subagent id learns which
+      // conversation's board it actually got instead of seeing an echo.
+      sessionId: board.sessionId,
       objective: board.objective,
       phase: phaseOf(board),
       agents: board.agents.map(card => ({ ...card })),
@@ -248,15 +302,18 @@ export class Hub {
    * @returns {() => void} Unsubscribe.
    */
   subscribe(sessionId, send) {
-    let set = this.#subscribers.get(sessionId)
+    // Resolved like every other entry point: a subscriber keyed by a subagent id
+    // would never match the frames emitted under the conversation's id.
+    const key = this.#boardSessionOf(sessionId)
+    let set = this.#subscribers.get(key)
     if (set === undefined) {
       set = new Set()
-      this.#subscribers.set(sessionId, set)
+      this.#subscribers.set(key, set)
     }
     set.add(send)
     return () => {
       set.delete(send)
-      if (set.size === 0) this.#subscribers.delete(sessionId)
+      if (set.size === 0) this.#subscribers.delete(key)
     }
   }
 
@@ -294,6 +351,7 @@ export class Hub {
    * @returns {Promise<Record<string, any>>} The draft plus call metadata.
    */
   async draft(sessionId, request) {
+    this.#assertBoardOwner(sessionId)
     const board = this.board(sessionId)
     const objective = String(request.objective ?? '').trim()
     if (objective === '') throw new HubError(400, 'objective 不能为空')
@@ -343,6 +401,7 @@ export class Hub {
    * @returns {Promise<Record<string, any>>} The started cards.
    */
   async launch(sessionId, payload, options = {}) {
+    this.#assertBoardOwner(sessionId)
     const subagents = this.ctx.get?.('subagents')
     if (subagents === undefined || subagents === null || typeof subagents.startContinuable !== 'function') {
       throw new HubError(503, '子智能体服务不可用：这个部署没有加载 subagent 运行时')
@@ -587,6 +646,7 @@ export class Hub {
    * @returns {Record<string, any>} Acceptance receipt.
    */
   clear(sessionId) {
+    this.#assertBoardOwner(sessionId)
     const board = this.#boards.get(sessionId)
     if (board !== undefined) {
       for (const card of board.agents) if (card.id !== null) this.#children.delete(card.id)
@@ -642,12 +702,13 @@ export class Hub {
       throw new HubError(409, '调用方不在任何协作台上：只有协作台派发的智能体（或它所在的父会话）能在进度板上发言')
     }
     const { board, card } = located
+    const speaker = this.#speakerName(board, senderSessionId, card)
     const target = typeof input.to === 'string' ? input.to.trim() : ''
     if (target === '' || target === 'all' || target === '*') {
       const item = this.append(board.sessionId, {
         kind: input.kind ?? 'progress',
         from: senderSessionId,
-        fromName: card?.name ?? '父会话',
+        fromName: speaker,
         to: '*',
         toName: '全体',
         agentId: senderSessionId,
@@ -659,12 +720,12 @@ export class Hub {
     if (peer.id === null) throw new HubError(409, `同伴 ${peer.name} 还没有启动`)
     if (peer.id === senderSessionId) throw new HubError(400, '不能给自己发消息')
     const messageId = await this.#deliver(
-      board.sessionId, peer, `来自同伴 ${card?.name ?? '父会话'} 的进度：${text}`, 'queue', 'agent', card?.name ?? '父会话',
+      board.sessionId, peer, `来自同伴 ${speaker} 的进度：${text}`, 'queue', 'agent', speaker,
     )
     const item = this.append(board.sessionId, {
       kind: 'handoff',
       from: senderSessionId,
-      fromName: card?.name ?? '父会话',
+      fromName: speaker,
       to: peer.id,
       toName: peer.name,
       agentId: senderSessionId,
@@ -692,7 +753,9 @@ export class Hub {
       .slice(-limit)
     return {
       objective: board.objective,
-      you: card === null ? { name: '父会话', task: board.objective } : { name: card.name, task: card.task, files: card.files },
+      you: card === null
+        ? { name: this.#speakerName(board, senderSessionId, card), task: board.objective }
+        : { name: card.name, task: card.task, files: card.files },
       roster: board.agents.map(agent => ({
         name: agent.name,
         role: agent.role,
@@ -1016,7 +1079,14 @@ export class Hub {
 
   /**
    * Locate a session on the boards.
-   * @param {string} sessionId - A board owner or one of its children.
+   *
+   * The boundary this feature draws is the **board**, not the roster: anything
+   * belonging to a conversation resolves to that conversation's board, and nothing
+   * resolves to any other conversation's board. That is why the last branch exists
+   * — a subagent of a subagent is still on the same board and reads it as a
+   * participant, where refusing it would teach the model that the board is
+   * sometimes there and sometimes not.
+   * @param {string} sessionId - A board owner or any of its descendants.
    * @returns {{ board: Record<string, any>, card: Record<string, any>|null }|null} Location, or null when unknown.
    */
   #locate(sessionId) {
@@ -1024,11 +1094,37 @@ export class Hub {
     const direct = this.#boards.get(sessionId)
     if (direct !== undefined) return { board: direct, card: null }
     const link = this.#children.get(sessionId)
-    if (link === undefined) return null
-    const board = this.#boards.get(link.sessionId)
-    if (board === undefined) return null
-    const card = board.agents.find(agent => agent.clientId === link.clientId)
-    return card === undefined ? null : { board, card }
+    if (link !== undefined) {
+      const board = this.#boards.get(link.sessionId)
+      if (board === undefined) return null
+      const card = board.agents.find(agent => agent.clientId === link.clientId)
+      return card === undefined ? null : { board, card }
+    }
+    const owner = this.#boardSessionOf(sessionId)
+    if (owner === sessionId) return null
+    // A **direct** child of the conversation that the hub is not tracking was
+    // launched and then replaced — a re-launch, or a cleared board — so its access
+    // is revoked along with its card, and reporting "not on any board" is the
+    // honest answer. A deeper descendant, one of our own agents' subagents, is a
+    // participant of the same board and reads it as one.
+    const parent = this.ctx.get?.('agents')?.get?.(sessionId)?.session?.header?.parentSession
+    if (parent === owner) return null
+    const board = this.#boards.get(owner)
+    return board === undefined ? null : { board, card: null }
+  }
+
+  /**
+   * How to name a speaker that has no card on the board.
+   * @param {Record<string, any>} board - The board.
+   * @param {string} sessionId - Speaking session.
+   * @param {Record<string, any>|null} card - The speaker's card, when it has one.
+   * @returns {string} Display name.
+   */
+  #speakerName(board, sessionId, card) {
+    if (card !== null) return card.name
+    // The conversation itself, or a subagent of it that the hub did not launch.
+    // Calling both "父会话" would misattribute a grandchild's words.
+    return sessionId === board.sessionId ? '父会话' : '子智能体'
   }
 
   /**

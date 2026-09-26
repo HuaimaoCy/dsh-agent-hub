@@ -1,4 +1,4 @@
-/**
+﻿/**
  * dsh-agent-hub smoke test.
  *
  * Drives the real Host half — the real `apply`, the real route handler, the real
@@ -90,7 +90,23 @@ const routes = []
 
 /** Services the plugin resolves through `ctx.get`. */
 const services = {
-  agents: { get: id => (id === 'session-parent' ? parentAgent : undefined) },
+  agents: {
+    get: (id) => {
+      if (id === 'session-parent') return parentAgent
+      // `child-*` stands for a subagent of the conversation, which is what lets
+      // the suite exercise the rule "a board belongs to a conversation": the
+      // header field is the same one the harness writes for a real child.
+      if (typeof id === 'string' && id.startsWith('child-')) {
+        // `child-x-*` is a subagent of a subagent: its parent is itself a subagent,
+        // which is how the suite tells a deeper descendant (a participant of the
+        // same board) apart from a direct child whose card was replaced.
+        const parent = id.startsWith('child-x-') ? 'child-1' : 'session-parent'
+        return { id, session: { id, header: { parentSession: parent } } }
+      }
+      // Every other id is an unrelated root session, so it owns its own board.
+      return undefined
+    },
+  },
   subagents: {
     list: () => ['spawn', 'fork'],
     startContinuable: async (spec) => {
@@ -948,6 +964,56 @@ await check('hub_read 的输出同时包含原生团队与任务板', async () =
   const text = await tool.execute({}, { agent: { session: { id: target } } })
   assert.match(text, /原生 Agent Teams/)
   assert.match(text, /成员 lead/)
+})
+
+console.log('\n可见范围：一块台，且只有一块台')
+await check('子会话 id 不会凭空开出一块空台', async () => {
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=child-phantom`)
+  // The id resolves upward to the conversation, so the caller gets the real board
+  // rather than a fresh empty one keyed by the child.
+  assert.equal(response.payload.result.sessionId, sessionId)
+  assert.ok(response.payload.result.agents.length > 0)
+})
+await check('会话的后代智能体读的是同一块台', async () => {
+  const tool = harness.tools.registered.get('hub_read')
+  const text = await tool.execute({}, { agent: { session: { id: 'child-x-1' } } })
+  assert.match(text, /你：子智能体/, 'a descendant the hub did not launch is still a board participant')
+  assert.match(text, /队友：/)
+  assert.match(text, /目标：/)
+})
+await check('子智能体不能自己开台（否则花名册会静默撕裂）', async () => {
+  const tool = harness.tools.registered.get('hub_launch')
+  await assert.rejects(
+    () => tool.execute(
+      { objective: '另起一块', agents: [{ name: 'n', task: 't', provider: 'p', model: 'm' }] },
+      { agent: { id: 'child-x-1', session: { id: 'child-x-1' } }, signal: new AbortController().signal },
+    ),
+    /子智能体不能自己开台/,
+  )
+  // The refusal must not have allocated anything: the id still resolves to the
+  // conversation's board.
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=child-x-1`)
+  assert.equal(response.payload.result.sessionId, sessionId)
+})
+await check('子智能体不能清掉会话的台', async () => {
+  const tool = harness.tools.registered.get('hub_launch')
+  assert.equal(typeof tool, 'object')
+  const cleared = await request(route, 'POST', `${ROUTE_PATH}?op=clear`, { op: 'clear', sessionId: 'child-x-1' }, { [MARKER_HEADER]: '1' })
+  assert.equal(cleared.status, 409)
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  assert.ok(response.payload.result.agents.length > 0, 'the conversation board must survive')
+})
+await check('跨会话的台互相不可见', async () => {
+  const other = await request(route, 'POST', `${ROUTE_PATH}?op=draft`, {
+    op: 'draft', sessionId: 'session-other', objective: '另一个对话的目标', count: 1,
+  }, { [MARKER_HEADER]: '1' })
+  assert.equal(other.status, 200)
+  const tool = harness.tools.registered.get('hub_read')
+  const text = await tool.execute({}, { agent: { session: { id: 'child-x-1' } } })
+  assert.ok(!text.includes('另一个对话的目标'), 'one conversation\'s board must never appear in another')
+  const own = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=session-other`)
+  assert.equal(own.payload.result.objective, '另一个对话的目标')
+  assert.equal(own.payload.result.sessionId, 'session-other')
 })
 
 console.log('\n实时流')
