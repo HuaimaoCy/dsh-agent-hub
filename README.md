@@ -30,7 +30,13 @@ multi-turn continuation), not "several models each say a paragraph".
 ## Install
 
 ```powershell
-# from the dsh source checkout root
+# straight from GitHub
+pnpm dsh plugin --profile web add github:HuaimaoCy/dsh-agent-hub
+
+# or from the released tarball
+pnpm dsh plugin --profile web add https://github.com/HuaimaoCy/dsh-agent-hub/releases/latest/download/plugin.tgz
+
+# or from a local checkout
 pnpm dsh plugin --profile web add <absolute path to this directory>
 ```
 
