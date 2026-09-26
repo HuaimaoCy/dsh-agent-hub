@@ -107,6 +107,27 @@ export function formatBoard(view) {
     const time = new Date(item.time).toLocaleTimeString('zh-CN', { hour12: false })
     lines.push(`- [${time}] ${item.from} → ${item.to}：${item.text}`)
   }
+  // The harness's own Agent Teams state, rendered in the same answer so an agent
+  // never has to know that "the team" and "the board" are two subsystems.
+  const team = view.team
+  if (team !== undefined && team !== null && team.available === true) {
+    if (team.error !== undefined && team.error !== null) {
+      lines.push('', `原生团队状态读取失败：${team.error}`)
+    } else if (team.readable === true) {
+      lines.push('', `原生 Agent Teams：${team.members.length} 个成员、${team.tasks.length} 个任务`)
+      for (const member of team.members) {
+        lines.push(`- 成员 ${member.name}（${member.status}${member.role === 'lead' ? '，lead' : ''}）`
+          + `${member.model === undefined ? '' : ` · ${member.model}`}`)
+      }
+      for (const task of team.tasks) {
+        lines.push(`- [${task.status}] ${task.id} rev${task.revision}：${task.subject}`
+          + `${task.ownerName === undefined ? '' : `（负责：${task.ownerName}）`}`
+          + `${task.writeScopes.length === 0 ? '' : ` · 范围 ${task.writeScopes.join('、')}`}`
+          + `${task.blockedBy.length === 0 ? '' : ` · 依赖 ${task.blockedBy.join('、')}`}`)
+      }
+    }
+    if (typeof team.warning === 'string' && team.warning !== '') lines.push(`- 注意：${team.warning}`)
+  }
   return lines.join('\n')
 }
 

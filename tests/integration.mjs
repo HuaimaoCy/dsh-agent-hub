@@ -90,6 +90,23 @@ const services = {
     },
   },
   webServer: { register: (entry) => { routes.push(entry); return () => {} } },
+  // The harness's own Agent Teams service. Present so the cross-half test covers
+  // the merged picture: a native teammate and a native task must reach the panel
+  // through the same snapshot the hub's own lanes travel in.
+  agentTeams: {
+    tryMembership: agent => (agent?.id === 'session-parent'
+      ? { root: agent, id: 'team-1', role: 'lead', name: 'lead' }
+      : undefined),
+    listMembers: () => [
+      { id: 'session-parent', name: 'lead', role: 'lead', status: 'running', model: 'deepseek-flash', diagnostics: [] },
+      { id: 'child-native-1', name: 'reviewer', role: 'teammate', status: 'inactive', description: '原生队友', provider: 'spawn', model: 'glm-4.7', diagnostics: [] },
+    ],
+    listTasks: () => [{
+      id: 'task-7', revision: 3, subject: '原生团队自己建的任务', description: '由原生工具创建',
+      status: 'in_progress', blockedBy: [], writeScopes: ['docs/**'], ownerName: 'reviewer',
+      ready: true, writeScopeWarnings: [],
+    }],
+  },
 }
 
 const toolStorage = new Map()
@@ -202,6 +219,27 @@ await check('浏览器半能读懂宿主半的快照', () => {
   assert.equal(state.objective, '把构建迁移到 pnpm')
   assert.equal(state.agents.length, 2)
   assert.ok(state.feed.length > 0, 'the host board must carry feed items')
+})
+await check('原生 Agent Teams 的成员与任务随同一次快照到达界面', () => {
+  const state = helpers.applyStreamEvent(helpers.emptyState(sessionId), 'snapshot', hostState)
+  assert.equal(state.team.available, true)
+  assert.equal(state.team.readable, true)
+  // The native roster includes the lead row the runtime synthesises, plus the one
+  // teammate the harness itself spawned — the point of the merge is that the panel
+  // does not have to know which subsystem a row came from.
+  assert.equal(state.team.members.length, 2)
+  assert.equal(state.team.members[1].name, 'reviewer')
+  assert.equal(state.team.members[1].model, 'glm-4.7')
+  assert.equal(state.team.tasks[0].subject, '原生团队自己建的任务')
+  assert.equal(state.team.tasks[0].status, 'in_progress')
+  assert.deepEqual(state.team.tasks[0].writeScopes, ['docs/**'])
+})
+await check('board 帧只更新告警，不会抹掉团队快照', () => {
+  const state = helpers.applyStreamEvent(helpers.emptyState(sessionId), 'snapshot', hostState)
+  const warned = helpers.applyStreamEvent(state, 'board', { sessionId, objective: state.objective, phase: 'running', teamWarning: '任务板写入失败：boom' })
+  assert.equal(warned.team.warning, '任务板写入失败：boom')
+  assert.equal(warned.team.members.length, 2, 'a warning must not blank the roster')
+  assert.equal(warned.team.tasks.length, 1)
 })
 await check('宿主发出的每个 status 浏览器半都有色调与文案', () => {
   // The union the Host half can produce, spelled out here on purpose: adding a

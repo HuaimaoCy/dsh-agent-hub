@@ -26,6 +26,7 @@ import { randomUUID } from 'node:crypto'
 
 import { draftPlan } from './llm.js'
 import { buildAgentPrompt, buildAgentPersona } from './prompt.js'
+import { publishPlan, readTeam, settleTask } from './team.js'
 
 /** Statuses from which an agent does not move on its own any more. */
 const TERMINAL_STATUSES = new Set(['done', 'error', 'stopped'])
@@ -180,12 +181,17 @@ export class Hub {
    */
   state(sessionId) {
     const board = this.board(sessionId)
+    const team = readTeam(this.ctx, this.ctx.get?.('agents')?.get?.(sessionId))
+    if (board.teamWarning !== undefined && board.teamWarning !== null) team.warning = board.teamWarning
     return {
       sessionId,
       objective: board.objective,
       phase: phaseOf(board),
       agents: board.agents.map(card => ({ ...card })),
       feed: board.feed.map(item => ({ ...item })),
+      // The durable half of the integration: the harness's own Agent Teams state,
+      // read rather than mirrored, so one board can show both rosters.
+      team,
       providers: this.providers(),
       hasLLM: typeof this.ctx.get?.('llm')?.stream === 'function',
       limits: { maxAgents: this.settings.maxAgents },
@@ -412,6 +418,20 @@ export class Hub {
       this.#emitAgent(sessionId, card)
     }
     this.#emitBoard(board)
+    // The durable half of the integration: the roster the user just approved is
+    // published as real team tasks, so the native Team UI and the `team_task_*`
+    // tools see the same plan. Best-effort — the agents are already running, so a
+    // board that refuses one row must not cancel the launch.
+    const plan = await publishPlan(this.ctx, parent, board.agents)
+    if (plan.published > 0) {
+      this.append(board.sessionId, {
+        kind: 'plan',
+        from: 'system',
+        fromName: '系统',
+        text: `已把这 ${plan.published} 项工作写进原生团队任务板（团队面板与 team_task_list 都能看到）`,
+      })
+    }
+    if (plan.error !== null) this.#noteTeamWarning(board, `原生任务板写入失败：${plan.error}`)
     return { agents: board.agents.map(card => ({ ...card })) }
   }
 
@@ -687,6 +707,10 @@ export class Hub {
         kind: item.kind,
         text: oneLine(item.text, 400),
       })),
+      // The harness's own Agent Teams state, so an agent reading the board sees
+      // one picture: its peers on this board *and* the team the harness knows
+      // about, with the durable task board both of them write to.
+      team: readTeam(this.ctx, this.ctx.get?.('agents')?.get?.(board.sessionId)),
     }
   }
 
@@ -870,6 +894,15 @@ export class Hub {
     })
     this.#emitAgent(board.sessionId, card)
     this.#emitBoard(board)
+    // Close the durable task this agent was published as. Fire-and-forget on
+    // purpose: the board update the user is watching must not wait on a
+    // compare-and-set that may be racing the model's own task edits.
+    void settleTask(this.ctx, board.sessionId, card).then(outcome => {
+      if (outcome.error !== null) this.#noteTeamWarning(board, `原生任务收尾失败：${outcome.error}`)
+      else if (outcome.completed) this.#emitAgent(board.sessionId, card)
+    }).catch(() => {
+      // A rejection here is already reported through the warning path above.
+    })
   }
 
   /**
@@ -1033,7 +1066,24 @@ export class Hub {
       sessionId: board.sessionId,
       objective: board.objective,
       phase: phaseOf(board),
+      ...(board.teamWarning === undefined || board.teamWarning === null ? {} : { teamWarning: board.teamWarning }),
     })
+  }
+
+  /**
+   * Record one non-fatal failure of the Agent Teams bridge.
+   *
+   * It goes to the board's own warning slot rather than the feed: these repeat on
+   * every settle, and a feed filling with retry noise would bury the agents'
+   * actual progress. It stays visible through `state().team.warning`.
+   * @param {Record<string, any>} board - The board.
+   * @param {string} message - What failed.
+   * @returns {void}
+   */
+  #noteTeamWarning(board, message) {
+    board.teamWarning = message
+    this.ctx.logger?.warn?.(`agent-hub: ${message}`)
+    this.#emitBoard(board)
   }
 
   /** Emit one card immediately; used for state changes a human is waiting on. */

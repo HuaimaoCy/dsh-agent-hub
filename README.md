@@ -104,6 +104,52 @@ The policy text rides on every request of every session in the deployment, so it
 can be switched off with `policy: false`; the board then exists purely as a UI
 surface.
 
+## Relationship to the built-in Agent Teams
+
+The two overlap — a roster, a shared board, messages between members — so this is
+an **integration**, not two features standing side by side:
+
+| | Who owns it |
+|---|---|
+| Durability: members, tasks, dependencies, write scopes | **Agent Teams** — written to the Lead's session log, survives a restart |
+| Per-agent model, per-agent tool scope, live token view | **the hub** — the native `spawn_teammate` carries `provider` but no model |
+
+Three things follow:
+
+1. **One board.** The panel draws the hub's lanes and the native roster together:
+   `op=state` reads `ctx.agentTeams` for its `team` field instead of mirroring it,
+   so a change on the native side — including tasks created by the native tools —
+   shows up here immediately.
+2. **One plan.** A roster approved through `hub_launch` is published as **native
+   tasks** (`createTask` → `claim`), and each agent's task is completed by
+   compare-and-set when it settles. The Team panel, `team_task_list` and this
+   board therefore read the same revisioned, dependency-aware task table — not a
+   free-text "plan" beside a real one.
+3. **Failures stay non-fatal.** A refused task write does not cancel a launch (the
+   agents are already running); it leaves one visible warning on the team block
+   instead of filling the feed with retry noise.
+
+### One seam remains
+
+The native `list_agents` / `send_message` **do not see hub-dispatched agents** —
+they are not team members. The reason is specific: `SpawnTeammateRequest` carries
+`provider` but no model, and the team service has **no API to adopt an existing
+child**, so going through the native spawn would cost every agent its model, which
+is the point of the feature.
+
+Two ways to close it, neither implemented:
+
+- **The upstream way**: add `agentOptions` to `SpawnTeammateRequest` and thread it
+  into the internal `startContinuable`. The capability already exists — the `spawn`
+  provider advertises `agentOptions/persona/toolFilter` and the continuable path
+  does not check capabilities — the Team layer simply never passes it down.
+- **Hand-written events**: `session.append('team/member', …)` does register a hub
+  agent as a member, and hub children happen to satisfy the
+  "Lead's direct continuable child" requirement for delivery. But the projection
+  validates strictly, and **one invalid record puts that session's Agent Teams
+  into a permanent `failure`** where no further event applies. That is not a cost a
+  third-party plugin should impose on someone else's session, so it is not used.
+
 ## Status semantics
 
 | Status | Meaning |

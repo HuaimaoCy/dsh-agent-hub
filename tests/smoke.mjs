@@ -65,6 +65,12 @@ const state = {
   promptCalls: [],
   interruptCalls: [],
   policySections: [],
+  teamTasks: [],
+  teamMembers: [],
+  teamCreateCalls: [],
+  teamUpdateCalls: [],
+  teamCreateFails: false,
+  teamTaskSeq: 0,
   llmOptions: null,
   llmCallCount: 0,
   warnings: [],
@@ -112,6 +118,53 @@ const services = {
       yield { type: 'text-delta', text: state.llmReply }
       yield { type: 'usage', usage: { inputTokens: 12, outputTokens: 34 } }
       yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  },
+  // The harness's own Agent Teams service, mocked to the contract that was
+  // verified against the live runtime: compare-and-set on `revision`, and a task
+  // can only complete after it was claimed.
+  agentTeams: {
+    tryMembership: agent => (agent?.id === 'session-parent'
+      ? { root: agent, id: 'team-1', role: 'lead', name: 'lead' }
+      : undefined),
+    listMembers: () => [
+      { id: 'session-parent', name: 'lead', role: 'lead', status: 'running', model: 'deepseek-flash', diagnostics: [] },
+      ...state.teamMembers,
+    ],
+    listTasks: () => state.teamTasks.filter(task => task.status !== 'deleted').map(task => ({ ...task })),
+    createTask: async (caller, request) => {
+      state.teamCreateCalls.push(request)
+      if (state.teamCreateFails) throw new Error('board refused the task')
+      state.teamTaskSeq += 1
+      const task = {
+        id: `task-${state.teamTaskSeq}`,
+        revision: 1,
+        subject: request.subject,
+        description: request.description,
+        status: 'pending',
+        blockedBy: [],
+        writeScopes: request.writeScopes ?? [],
+        ready: true,
+        writeScopeWarnings: [],
+      }
+      state.teamTasks.push(task)
+      return { ...task }
+    },
+    updateTask: async (caller, request) => {
+      state.teamUpdateCalls.push(request)
+      const task = state.teamTasks.find(candidate => candidate.id === request.taskId)
+      if (task === undefined) throw new Error(`no such task ${request.taskId}`)
+      if (task.revision !== request.expectedRevision) {
+        throw new Error(`revision mismatch on ${request.taskId}: expected ${request.expectedRevision}, have ${task.revision}`)
+      }
+      if (request.action === 'complete' && task.status !== 'in_progress') {
+        throw new Error('only an in-progress task can complete')
+      }
+      task.revision += 1
+      if (request.action === 'claim') { task.status = 'in_progress'; task.ownerName = 'lead'; task.ready = false }
+      if (request.action === 'complete') task.status = 'completed'
+      if (request.action === 'delete') task.status = 'deleted'
+      return { ...task }
     },
   },
   // The standing policy is a system-prompt section; recording it here is how the
@@ -819,6 +872,82 @@ await check('没有模型的名册被拒绝而不是静默用默认模型', asyn
 await check('没有会话上下文时开台报错而不是猜一个会话', async () => {
   const tool = harness.tools.registered.get('hub_launch')
   await assert.rejects(() => tool.execute({ objective: 'x' }, { signal: new AbortController().signal }), /需要一个会话/)
+})
+
+console.log('\n与原生 Agent Teams 集成')
+const integrationLaunch = await request(route, 'POST', `${ROUTE_PATH}?op=launch`, {
+  op: 'launch', sessionId, objective: '集成验证', agents: draftRows,
+}, { [MARKER_HEADER]: '1' })
+const integrationIds = integrationLaunch.payload.result.agents.map(agent => agent.id)
+
+await check('state 里带出原生团队名册与任务板', async () => {
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const team = response.payload.result.team
+  assert.equal(team.available, true)
+  assert.equal(team.readable, true)
+  assert.equal(team.error, null)
+  assert.ok(team.members.some(member => member.role === 'lead'), 'the lead row is synthesised by the team runtime')
+  assert.ok(Array.isArray(team.tasks))
+})
+await check('派发把名册写成原生任务，并认领（不认领之后无法 complete）', () => {
+  const created = state.teamCreateCalls.filter(call => call.subject.includes('架构') || call.subject.includes('评审'))
+  assert.ok(created.length >= 2, `expected one task per row, got ${created.length}`)
+  const claims = state.teamUpdateCalls.filter(call => call.action === 'claim')
+  assert.ok(claims.length >= 2, 'every created task must be claimed at launch')
+  const card = integrationLaunch.payload.result.agents[0]
+  assert.equal(typeof card.teamTaskId, 'string')
+  assert.equal(card.teamTaskRevision, 2, 'create(1) then claim(2)')
+})
+await check('任务带上写入范围，原生看板因此能查重与阻塞', () => {
+  const withScope = state.teamCreateCalls.find(call => Array.isArray(call.writeScopes) && call.writeScopes.length > 0)
+  assert.ok(withScope !== undefined, 'a row that owns files must publish that scope')
+  assert.deepEqual(withScope.writeScopes, ['src/hub.js'])
+})
+await check('智能体收尾时，它的原生任务被完成', async () => {
+  harness.handlers.get('subagent/end')({
+    runId: 'r9', provider: 'spawn', id: integrationIds[0], local: true, stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: '完成' }],
+  })
+  // The completion is fire-and-forget on purpose, so the board never waits on a
+  // compare-and-set that may be racing the model's own task edits.
+  await wait(80)
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  // Match by the task id the card carries, not by subject: earlier launches in
+  // this suite produced same-subject tasks that are still open, and the native
+  // board keeps history by design.
+  const cardTaskId = integrationLaunch.payload.result.agents[0].teamTaskId
+  const task = response.payload.result.team.tasks.find(row => row.id === cardTaskId)
+  assert.ok(task !== undefined, `task ${cardTaskId} must still be on the board`)
+  assert.equal(task.status, 'completed')
+})
+await check('任务板写入失败不会取消派发，而是留下可见告警', async () => {
+  state.teamCreateFails = true
+  try {
+    const response = await request(route, 'POST', `${ROUTE_PATH}?op=launch`, {
+      op: 'launch', sessionId, agents: draftRows,
+    }, { [MARKER_HEADER]: '1' })
+    assert.equal(response.status, 200, 'the agents are already running; a refused task must not fail the launch')
+    assert.equal(response.payload.result.agents.every(agent => agent.status === 'running'), true)
+    const stateful = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+    assert.match(String(stateful.payload.result.team.warning), /任务板写入失败/)
+  } finally {
+    state.teamCreateFails = false
+  }
+})
+await check('没有活动 Lead 的会话读团队状态不报错，只是读不到', async () => {
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=session-cold`)
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.result.team.available, true)
+  assert.equal(response.payload.result.team.readable, false)
+  assert.match(String(response.payload.result.team.error), /没有活动/)
+})
+await check('hub_read 的输出同时包含原生团队与任务板', async () => {
+  const current = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const target = current.payload.result.agents[0].id
+  const tool = harness.tools.registered.get('hub_read')
+  const text = await tool.execute({}, { agent: { session: { id: target } } })
+  assert.match(text, /原生 Agent Teams/)
+  assert.match(text, /成员 lead/)
 })
 
 console.log('\n实时流')

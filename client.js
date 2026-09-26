@@ -130,6 +130,9 @@ window.__ModuleLoader__.load({
         deliveryHint: '排队等它当前一步结束；立即插话会打断当前推理。',
         wake: '唤醒', interrupt: '中断', unavailableDraft: '智能体还没启动，这个操作不可用。',
         feed: '进度板', feedEmpty: '还没有进度。', feedAll: '全体',
+        teamBoard: '原生团队', teamCounts: '{a} 个成员 · {b} 个待办',
+        teamNoTasks: '原生任务板上没有待办。', taskActive: '进行中', taskPending: '待办',
+        taskBlocked: '依赖 {ids}',
         broadcast: '广播', broadcastPlaceholder: '发给所有智能体…', broadcastToAll: '默认发给全体',
         kindPlan: '方案', kindProgress: '进度', kindMessage: '消息',
         kindHandoff: '交接', kindHuman: '人工', kindSystem: '系统',
@@ -173,6 +176,9 @@ window.__ModuleLoader__.load({
         deliveryHint: 'Queueing waits for the current step; interrupting cuts into the running turn.',
         wake: 'Wake', interrupt: 'Interrupt', unavailableDraft: 'This agent has not started, so the action is unavailable.',
         feed: 'Progress', feedEmpty: 'Nothing has happened yet.', feedAll: 'everyone',
+        teamBoard: 'Agent Teams', teamCounts: '{a} members · {b} open tasks',
+        teamNoTasks: 'No open tasks on the team board.', taskActive: 'in progress', taskPending: 'pending',
+        taskBlocked: 'blocked by {ids}',
         broadcast: 'Broadcast', broadcastPlaceholder: 'To every agent…', broadcastToAll: 'goes to everyone by default',
         kindPlan: 'Plan', kindProgress: 'Progress', kindMessage: 'Message',
         kindHandoff: 'Handoff', kindHuman: 'Human', kindSystem: 'System',
@@ -205,7 +211,12 @@ window.__ModuleLoader__.load({
     function emptyState(sessionId) {
       return {
         sessionId: String(sessionId ?? ''), objective: '', phase: 'idle', agents: [],
-        feed: [], providers: [], hasLLM: false, now: 0,
+        feed: [], providers: [], hasLLM: false,
+        // The harness's own Agent Teams state, read by the Host half. `null` means
+        // "no snapshot yet", which the panel keeps distinct from a readable-but-empty
+        // team.
+        team: null,
+        now: 0,
       }
     }
 
@@ -275,6 +286,7 @@ window.__ModuleLoader__.load({
             feed: Array.isArray(payload.feed) ? payload.feed.slice(-FEED_CAP) : [],
             providers: Array.isArray(payload.providers) ? payload.providers : (base.providers ?? []),
             hasLLM: payload.hasLLM === undefined ? base.hasLLM === true : payload.hasLLM === true,
+            team: payload.team === undefined || payload.team === null ? (base.team ?? null) : payload.team,
             now,
           }
         case 'agent':
@@ -286,6 +298,16 @@ window.__ModuleLoader__.load({
           if (typeof payload.objective === 'string') next.objective = payload.objective
           if (typeof payload.phase === 'string') next.phase = payload.phase
           if (typeof payload.sessionId === 'string') next.sessionId = payload.sessionId
+          // A board frame carries only a warning about the team bridge. It is
+          // merged into the last team snapshot rather than replacing it, so a
+          // failure stays visible between snapshots instead of blanking the panel.
+          if (typeof payload.teamWarning === 'string' && payload.teamWarning !== '') {
+            next.team = {
+              available: true, readable: false, error: null, members: [], tasks: [],
+              ...(base.team ?? {}),
+              warning: payload.teamWarning,
+            }
+          }
           return next
         }
         case 'heartbeat':
@@ -689,6 +711,11 @@ window.__ModuleLoader__.load({
   box-shadow: inset 0 0 0 1px var(--dsw-alias-settings-card-stroke);
 }
 .dsah-feed-list { display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow: auto; padding-right: 2px; }
+/* The harness's own team state, read through the Host half: roster chips plus the
+   durable task board. It sits above the free-text feed because a task is a plan
+   and the feed is a log — the plan reads first. */
+.dsah-team { display: flex; flex-direction: column; gap: 6px; padding: 8px 9px; border-radius: var(--dsw-radius-sm); background: color-mix(in srgb, currentColor 4%, transparent); }
+.dsah-team-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .dsah-feed-item { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: var(--dsw-radius-sm); background: color-mix(in srgb, currentColor 3%, transparent); }
 .dsah-feed-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .dsah-feed-text { font-size: var(--dsah-fs-small); line-height: var(--dsah-lh-small); color: var(--dsw-alias-label-secondary); word-break: break-word; }
@@ -1385,6 +1412,69 @@ window.__ModuleLoader__.load({
      * `sessionId` is resolved by the caller: the root panel derives it from the
      * session list, and the conversation view is handed it by the shell.
      */
+    /**
+     * The harness's own Agent Teams state, rendered inside this board.
+     *
+     * Both features answer "several agents, one board", so they are presented as
+     * one: the team's roster and its durable task board appear here beside the
+     * hub's own lanes and feed.
+     *
+     * The tasks matter most. They are the **durable** half — written to the Lead's
+     * session log — so unlike this board's in-memory projection they survive a
+     * restart, and they are the same board the native Team panel and the
+     * `team_task_*` tools read and write. Showing them here is what makes "the
+     * plan" one object instead of two.
+     * @param {Record<string, any>} props - Team snapshot plus the translate function.
+     * @returns {unknown} React element.
+     */
+    function TeamPanel({ team, t }) {
+      if (team === null || team === undefined || team.available !== true) return null
+      const members = Array.isArray(team.members) ? team.members : []
+      const tasks = Array.isArray(team.tasks) ? team.tasks : []
+      const open = tasks.filter(task => task.status !== 'completed' && task.status !== 'deleted')
+      return h('div', { className: 'dsah-team' },
+        h('div', { className: 'dsah-bar' },
+          h('span', { className: 'dsah-label' }, t('teamBoard')),
+          h('span', { className: 'dsah-cap' }, t('teamCounts', { a: members.length, b: open.length })),
+        ),
+        typeof team.error === 'string' && team.error !== ''
+          ? h('div', { className: 'dsah-empty' }, team.error)
+          : null,
+        typeof team.warning === 'string' && team.warning !== ''
+          ? h('div', { className: 'dsah-empty' }, team.warning)
+          : null,
+        members.length === 0 ? null : h('div', { className: 'dsah-team-row' },
+          ...members.map(member => h(Tag, {
+            key: String(member.id),
+            tone: member.role === 'lead' ? 'info'
+              : member.status === 'running' ? 'success'
+                : member.status === 'failed' ? 'danger' : 'outline',
+          }, `${String(member.name)}${member.model === undefined ? '' : ` · ${String(member.model)}`}`)),
+        ),
+        open.length === 0
+          ? h('div', { className: 'dsah-empty' }, t('teamNoTasks'))
+          : h('div', { className: 'dsah-feed-list' },
+              ...open.map(task => h('div', { className: 'dsah-feed-item', key: String(task.id) },
+                h('div', { className: 'dsah-feed-meta' },
+                  h(Tag, { tone: task.status === 'in_progress' ? 'info' : 'outline' },
+                    t(task.status === 'in_progress' ? 'taskActive' : 'taskPending')),
+                  h('span', { className: 'dsah-feed-route' }, String(task.id)),
+                  task.ownerName === undefined
+                    ? null
+                    : h('span', { className: 'dsah-feed-route' }, `→ ${String(task.ownerName)}`),
+                  Array.isArray(task.blockedBy) && task.blockedBy.length > 0
+                    ? h('span', { className: 'dsah-feed-route' }, t('taskBlocked', { ids: task.blockedBy.join('、') }))
+                    : null,
+                ),
+                h('div', { className: 'dsah-feed-text' }, String(task.subject)),
+                Array.isArray(task.writeScopes) && task.writeScopes.length > 0
+                  ? h('div', { className: 'dsah-feed-route' }, task.writeScopes.join('、'))
+                  : null,
+              )),
+            ),
+      )
+    }
+
     function BoardBody({ sessionId, name, picker, t }) {
       const board = useBoard(sessionId)
       const catalog = useModelCatalog()
@@ -1490,6 +1580,9 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dsah-label' }, t('feed')),
           h('span', { className: 'dsah-cap' }, String(state.feed.length)),
         ),
+        // The durable half of the integration, in the same column as the feed so
+        // the two read as one picture rather than two competing features.
+        h(TeamPanel, { team: state.team, t }),
         state.feed.length === 0
           ? h('div', { className: 'dsah-empty' }, t('feedEmpty'))
           : h('div', { className: 'dsah-feed-list' },

@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-hub",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Agent Hub for DSH: run several agents on different models at the same time and watch them exchange progress on one board.",
   "type": "module",

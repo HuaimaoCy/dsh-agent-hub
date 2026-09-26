@@ -87,6 +87,18 @@
     "phase": "idle|planned|running|done",   // idle 无草案；planned 有草案未跑；running 有在跑；done 全部终态
     "agents": [AgentCard],
     "feed": [FeedItem],          // 最近 200 条，最旧在前
+    "team": {                    // DSH 原生 Agent Teams 的状态：**读**出来而不是镜像
+      "available": true,         // 该部署是否组合了 agentTeams 服务
+      "readable": true,          // 是否真的读到了（false 时看 error）
+      "members": [ { "id": "session-x", "name": "reviewer", "role": "lead|teammate",
+                     "status": "running|inactive|provisioning|failed",
+                     "description": "…", "provider": "spawn", "model": "glm-4.7" } ],
+      "tasks":   [ { "id": "task-7", "revision": 3, "subject": "…", "description": "…",
+                     "status": "pending|in_progress|completed|deleted", "ready": true,
+                     "ownerName": "reviewer", "writeScopes": ["docs/**"], "blockedBy": ["task-3"] } ],
+      "error": null,             // 读取失败的原因
+      "warning": null            // 桥接写入（开台时把分工发布成原生任务）的非致命失败
+    },
     "providers": ["spawn", "fork"],
     "hasLLM": true,              // 是否能调用协调者模型（draft 需要）
     "now": 1730000000000
@@ -128,7 +140,7 @@ data: {"sessionId":"…","agents":[…],"feed":[…],"phase":"running"}
 | `snapshot` | 与 `op=state` 的 result 同形 | 连接建立时立刻发一次 |
 | `agent` | 完整 AgentCard（覆盖式，不是补丁） | 某智能体状态/输出/用量变化（服务端按 ≥150ms 合并；逐 token 增量也走这一帧） |
 | `feed` | 单个 FeedItem | 新增一条进度或消息 |
-| `board` | `{ sessionId, objective, phase }` | 草案/阶段变化 |
+| `board` | `{ sessionId, objective, phase, teamWarning? }` | 草案/阶段变化；`teamWarning` 只携带桥接写失败，客户端应**合并**进上一次团队快照而不是覆盖 |
 | `heartbeat` | `{ now }` | 每 15 秒 |
 
 - 客户端断线自己重连（1s 起、×1.7、上限 15s）；服务端给了 `retry: 2000`。
