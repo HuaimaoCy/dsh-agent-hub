@@ -17,3 +17,8 @@
         # Powers a draft row starts with when the coordinator does not say.
         defaultWrite: true
         defaultShell: false
+        # The standing "when to use the hub" policy rides in every agent's system
+        # prompt. It is what makes agents reach for the board instead of solving
+        # everything single-threaded; turn it off if you want the board to exist
+        # only as a UI surface and would rather not spend the prompt space.
+        policy: true

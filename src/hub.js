@@ -161,6 +161,19 @@ export class Hub {
   }
 
   /**
+   * The board of one session, **without creating one**.
+   *
+   * `board()` allocates on demand, which is right for a request that is about to
+   * write. A prompt section asking "is there a board here" runs on every request
+   * of every session, so it must not be able to allocate one.
+   * @param {string} sessionId - Parent session id.
+   * @returns {Record<string, any>|undefined} The board, when the session has one.
+   */
+  peek(sessionId) {
+    return this.#boards.get(sessionId)
+  }
+
+  /**
    * Public snapshot of one board, exactly the shape `CONTRACT.md` documents.
    * @param {string} sessionId - Parent session id.
    * @returns {Record<string, any>} The state payload.
@@ -320,9 +333,10 @@ export class Hub {
    * provider refusal must not cancel the sibling agents that are already fine.
    * @param {string} sessionId - Parent session id.
    * @param {{ objective?: string, agents: Record<string, any>[], signal?: AbortSignal }} payload - Launch request.
+   * @param {{ parent?: Record<string, any> }} [options] - Caller-held live parent Agent, when the caller already has one.
    * @returns {Promise<Record<string, any>>} The started cards.
    */
-  async launch(sessionId, payload) {
+  async launch(sessionId, payload, options = {}) {
     const subagents = this.ctx.get?.('subagents')
     if (subagents === undefined || subagents === null || typeof subagents.startContinuable !== 'function') {
       throw new HubError(503, '子智能体服务不可用：这个部署没有加载 subagent 运行时')
@@ -334,7 +348,10 @@ export class Hub {
     }
     for (const [index, spec] of specs.entries()) validateSpec(spec, index)
 
-    const parent = this.#liveParent(sessionId)
+    // A tool caller already holds its own live Agent (`exec.agent`), which is a
+    // stronger credential than a lookup by session id: it is the exact agent
+    // making the call, so nothing can race and nothing can come back empty.
+    const parent = options.parent ?? this.#liveParent(sessionId)
     const provider = this.#pickProvider()
     const board = this.board(sessionId)
     if (typeof payload.objective === 'string' && payload.objective.trim() !== '') {

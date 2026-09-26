@@ -19,7 +19,7 @@
 import assert from 'node:assert/strict'
 
 import { apply as loadPlugin, Config, inject, name } from '../index.js'
-import { createCard, findPeer, HubError, messageOf, phaseOf, textFromBlocks } from '../src/hub.js'
+import { createCard, findPeer, Hub, HubError, messageOf, phaseOf, textFromBlocks } from '../src/hub.js'
 import { normalizeConfig } from '../src/config.js'
 import { buildAgentPersona, buildAgentPrompt } from '../src/prompt.js'
 import { finishError, normalizeAgents, parsePlanJson } from '../src/llm.js'
@@ -64,7 +64,9 @@ const state = {
   startCalls: [],
   promptCalls: [],
   interruptCalls: [],
+  policySections: [],
   llmOptions: null,
+  llmCallCount: 0,
   warnings: [],
 }
 
@@ -101,6 +103,7 @@ const services = {
     listProviders: () => [{ id: 'deepseek-official', name: 'DeepSeek' }, { id: 'zai-coding-cn', name: 'ZAI' }],
     listModels: async provider => (provider === 'deepseek-official' ? [{ id: 'deepseek-flash', name: 'DeepSeek Flash' }] : []),
     stream: async function* stream(options) {
+      state.llmCallCount += 1
       state.llmOptions = options
       if (state.llmFail) {
         yield { type: 'finish', reason: { kind: 'error', failure: { code: 'BOOM', message: '上游炸了' } } }
@@ -109,6 +112,17 @@ const services = {
       yield { type: 'text-delta', text: state.llmReply }
       yield { type: 'usage', usage: { inputTokens: 12, outputTokens: 34 } }
       yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  },
+  // The standing policy is a system-prompt section; recording it here is how the
+  // suite can assert what every agent is actually told about the hub.
+  systemPrompt: {
+    section: (options) => {
+      state.policySections.push(options)
+      return () => {
+        const at = state.policySections.indexOf(options)
+        if (at >= 0) state.policySections.splice(at, 1)
+      }
     },
   },
 }
@@ -280,15 +294,16 @@ await check('插件名与必需服务正确', () => {
   assert.equal(name, 'dsh-agent-hub')
   assert.deepEqual(inject, ['tools'])
 })
-await check('注册了两个协作工具', () => {
-  assert.deepEqual([...harness.tools.registered.keys()].sort(), ['hub_post', 'hub_read'])
+await check('注册了三个协作工具', () => {
+  assert.deepEqual([...harness.tools.registered.keys()].sort(), ['hub_launch', 'hub_post', 'hub_read'])
 })
-await check('两个工具的 parameters 都是 object 根的原始 JSON Schema', () => {
+await check('三个工具的 parameters 都是 object 根的原始 JSON Schema', () => {
   for (const tool of harness.tools.registered.values()) {
     assert.equal(tool.parameters.type, 'object', `${tool.name}.parameters.type`)
     assert.ok(tool.parameters.properties, `${tool.name}.parameters.properties`)
   }
   assert.deepEqual(harness.tools.registered.get('hub_post').parameters.required, ['text'])
+  assert.deepEqual(harness.tools.registered.get('hub_launch').parameters.required, ['objective'])
 })
 await check('订阅了五条宿主事件', () => {
   assert.deepEqual([...harness.handlers.keys()].sort(), [
@@ -707,6 +722,105 @@ await check('hub_read 渲染出名册与进度板', async () => {
   assert.match(text, /进度板/)
 })
 
+console.log('\n策略：让模型主动开台')
+await check('把「什么时候该开台」注册成常驻提示词段落', () => {
+  assert.equal(state.policySections.length, 1)
+  const section = state.policySections[0]
+  assert.equal(section.name, 'agent-hub-policy')
+  assert.equal(section.order, 60)
+  assert.equal(typeof section.text, 'function', 'the text is a callback so it can describe the live board')
+})
+await check('策略同时给出触发条件与克制条件', () => {
+  const text = state.policySections[0].text({ agent: { session: { id: sessionId } } })
+  // The triggers are what make an agent reach for the hub...
+  assert.match(text, /互相独立/)
+  assert.match(text, /不同模型/)
+  assert.match(text, /对抗性验证/)
+  // ...and the anti-triggers are what stop it parallelising a three-step task.
+  assert.match(text, /不要开台/)
+  assert.match(text, /净亏/)
+  assert.match(text, /看不到这段对话/)
+  // Knowing when is useless without knowing how.
+  assert.match(text, /hub_launch/)
+  assert.match(text, /hub_post/)
+})
+await check('策略对没有台的会话报「还没有协作台」', () => {
+  const text = state.policySections[0].text({ agent: { session: { id: 'session-never-seen' } } })
+  assert.match(text, /还没有协作台/)
+})
+await check('策略在没有会话上下文时也不报错', () => {
+  const text = state.policySections[0].text({})
+  assert.match(text, /还没有协作台/)
+})
+await check('已经有台时，策略报出队况而不是让模型再开一块', () => {
+  const text = state.policySections[0].text({ agent: { session: { id: sessionId } } })
+  assert.match(text, /已有一块协作台/)
+  assert.match(text, /个智能体/)
+  assert.match(text, /不要再开一块/)
+})
+await check('peek 不会为了回答问题而凭空建台', () => {
+  // The status line above runs on every request of every session, so the read
+  // path it uses must not allocate: an empty board per session would be a leak
+  // that only shows up as memory growth over a long uptime.
+  const hub = new Hub({
+    ctx: harness.ctx,
+    settings: { maxAgents: 8, defaultWrite: true, defaultShell: false, outputLimit: 100, feedLimit: 10, policy: true },
+  })
+  assert.equal(hub.peek('session-quiet'), undefined)
+  assert.notEqual(hub.board('session-quiet'), undefined, 'board() still allocates on demand')
+  assert.notEqual(hub.peek('session-quiet'), undefined)
+})
+
+console.log('\nhub_launch：模型自己开台')
+await check('只给目标时走协调者拆分', async () => {
+  const before = state.startCalls.length
+  const tool = harness.tools.registered.get('hub_launch')
+  const text = await tool.execute({ objective: '把这活拆开', count: 2 }, { agent: parentAgent, signal: new AbortController().signal })
+  assert.equal(state.startCalls.length - before, 2, 'the coordinator split must have launched both roles')
+  assert.match(text, /协作台已开台/)
+  assert.match(text, /架构/)
+  assert.match(text, /评审/)
+})
+await check('给了名册就跳过协调者，并逐个用指定模型', async () => {
+  const llmCallsBefore = state.llmCallCount
+  const before = state.startCalls.length
+  const tool = harness.tools.registered.get('hub_launch')
+  const text = await tool.execute({
+    objective: '直接开',
+    agents: [{ name: '丙', task: '只做一件事并汇报', provider: 'zai-coding-cn', model: 'glm-4.7', write: false }],
+  }, { agent: parentAgent, signal: new AbortController().signal })
+  assert.equal(state.startCalls.length - before, 1)
+  assert.equal(state.llmCallCount, llmCallsBefore, 'an explicit roster must not spend a coordinator call')
+  const spec = state.startCalls.at(-1)
+  assert.deepEqual(spec.request.agentOptions, { provider: 'zai-coding-cn', model: 'glm-4.7' })
+  assert.equal(spec.request.parent, parentAgent, 'the tool passes its own live agent, not a session lookup')
+  assert.match(text, /丙/)
+})
+await check('名册里没说要写的角色拿到的是只读工具范围', () => {
+  const spec = state.startCalls.at(-1)
+  const filter = spec.request.toolFilter
+  assert.ok(filter !== undefined, 'a row with write:false must be restricted')
+  assert.ok(Array.isArray(filter.allow), 'read-only is a whitelist, so an unenumerated write tool cannot slip through')
+})
+await check('空目标被拒绝', async () => {
+  const tool = harness.tools.registered.get('hub_launch')
+  await assert.rejects(
+    () => tool.execute({ objective: '   ' }, { agent: parentAgent, signal: new AbortController().signal }),
+    /objective 不能为空/,
+  )
+})
+await check('没有模型的名册被拒绝而不是静默用默认模型', async () => {
+  const tool = harness.tools.registered.get('hub_launch')
+  await assert.rejects(
+    () => tool.execute({ objective: 'x', agents: [{ name: '丁', task: 't' }] }, { agent: parentAgent, signal: new AbortController().signal }),
+    /没有选择模型/,
+  )
+})
+await check('没有会话上下文时开台报错而不是猜一个会话', async () => {
+  const tool = harness.tools.registered.get('hub_launch')
+  await assert.rejects(() => tool.execute({ objective: 'x' }, { signal: new AbortController().signal }), /需要一个会话/)
+})
+
 console.log('\n实时流')
 await check('SSE 建连先发 snapshot，随后推送增量', async () => {
   const res = streamResponse()
@@ -714,9 +828,17 @@ await check('SSE 建连先发 snapshot，随后推送增量', async () => {
   assert.equal(res.status, 200)
   const initial = framesOf(res.chunks)
   assert.equal(initial[0].event, 'snapshot')
-  assert.equal(initial[0].data.agents.length, 2)
+  // The invariant is that the stream's opening frame agrees with the state op —
+  // not a roster size that whichever test ran last happens to leave behind.
+  const stateRead = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  assert.equal(initial[0].data.agents.length, stateRead.payload.result.agents.length)
+  assert.ok(initial[0].data.agents.length >= 1)
+  // Drive the stream with an id read from the board rather than one captured
+  // earlier: a re-launch purges the previous children on purpose, so a stale id
+  // would be ignored and the test would blame the stream for it.
+  const liveId = stateRead.payload.result.agents[0].id
   const before = res.chunks.length
-  sessionEvent({ id: currentIds[0] }, {
+  sessionEvent({ id: liveId }, {
     type: 'tool/call', seq: 20, data: { turn: 3, step: 1, callId: 'c9', name: 'grep', arguments: '{"pattern":"registerHubRoutes"}' },
   })
   assert.ok(res.chunks.length > before, 'expected a frame pushed to the open stream')

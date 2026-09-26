@@ -16,6 +16,12 @@
  * `ctx.get` at the moment it is needed, so a deployment without a web server or
  * without an LLM still loads and simply reports the missing piece to the panel.
  *
+ * A board is only useful if agents actually reach for it, so the plugin also
+ * carries a standing policy section (`src/policy.js`) that tells every agent when
+ * parallelising pays and when it is a net loss, plus the `hub_launch` tool that
+ * makes acting on that policy a single call. The policy rides on every request of
+ * every session, which is why `policy` is a config option.
+ *
  * @module dsh-agent-hub
  */
 
@@ -23,6 +29,7 @@ import { Config, normalizeConfig } from './src/config.js'
 import { Hub } from './src/hub.js'
 import { registerHubRoutes } from './src/http.js'
 import { observeHub } from './src/observe.js'
+import { registerHubPolicy } from './src/policy.js'
 import { registerHubTools } from './src/tools.js'
 
 /** Host plugin name; must match the package name and the loader entry id. */
@@ -54,6 +61,7 @@ export function apply(ctx, config) {
     const stops = [
       observeHub(ctx, hub),
       registerHubTools(ctx, hub),
+      registerHubPolicy(ctx, hub, validated.value),
       registerHubRoutes(ctx, hub),
     ]
     return () => {

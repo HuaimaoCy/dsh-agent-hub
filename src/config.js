@@ -19,6 +19,16 @@ export const DEFAULT_CONFIG = {
   defaultWrite: true,
   /** Whether a draft row created without an explicit power starts able to run commands. */
   defaultShell: false,
+  /**
+   * Whether the standing "when to use the hub" policy rides in every agent's
+   * system prompt.
+   *
+   * On by default, because the feature is only useful if agents reach for it. Off
+   * is a supported choice: this text is sent on every request of every session in
+   * the deployment, so an operator who wants the board to exist purely as a UI
+   * surface should be able to stop paying for the prompt space.
+   */
+  policy: true,
   /** Length of one agent's retained output tail, in characters. */
   outputLimit: 4000,
   /** Feed items retained per board. */
@@ -57,7 +67,7 @@ export function normalizeConfig(raw) {
       value.provider = entry.trim()
       continue
     }
-    if (key === 'defaultWrite' || key === 'defaultShell') {
+    if (key === 'defaultWrite' || key === 'defaultShell' || key === 'policy') {
       if (typeof entry !== 'boolean') {
         issues.push({ message: `${key} must be a boolean`, path: [key] })
         continue

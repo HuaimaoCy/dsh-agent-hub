@@ -70,6 +70,40 @@ you were using.
 | `hub_post` | Publish one line of progress to the shared board. With `to: '<name>'` it is also delivered into that teammate's inbox and wakes it. |
 | `hub_read` | Read the roster plus everyone's latest progress — call it before starting so you do not duplicate a peer. |
 
+## Agents that actually reach for it
+
+A board nobody opens is decoration, and a tool nobody calls is invisible. So the
+plugin does two things beyond the UI:
+
+**A standing policy in every agent's prompt** (`src/policy.js`). It is written as
+a policy rather than a slogan, because both failure modes are real: an agent that
+has never been told what the board is for keeps solving everything
+single-threaded, while an agent told to "use it a lot" parallelises a two-line
+edit and pays a coordinator call plus N agent contexts for it. So it states
+
+- **triggers** — the objective splits into genuinely independent parts; breadth
+  across modules/options/sources is what is wanted; a *different model's*
+  judgement is worth having; the long part should run while the conversation
+  continues; a read-only role should attack another's output;
+- **anti-triggers** — steps depend on each other; one file, or roles that must
+  write the same files; a task two or three steps will finish (dispatching costs
+  more than it saves); context that cannot be handed over in one prompt, because
+  a child cannot see your conversation;
+- the mechanics, so knowing *when* is enough to know *how*;
+- one live line about the board as it is right now, so an agent joins the team
+  that exists instead of opening a second one on top of it.
+
+**A `hub_launch` tool**, because the policy is unactionable without it: before
+this, an agent could post to a board and read one, but only a human pressing a
+button could create one. `hub_launch` takes an objective (the coordinator splits
+it) or an objective plus an explicit roster (the coordinator call is skipped),
+and returns the launched team. Roster rows default to **read-only** — a model
+that did not ask to write does not get a writing agent by accident.
+
+The policy text rides on every request of every session in the deployment, so it
+can be switched off with `policy: false`; the board then exists purely as a UI
+surface.
+
 ## Status semantics
 
 | Status | Meaning |
@@ -102,6 +136,7 @@ Optional, in `cordis.patch.yml` or the profile's patch layer:
 | `provider` | `''` | Subagent provider; empty = the first the runtime reports (`spawn`) |
 | `maxAgents` | `8` | Launch ceiling |
 | `defaultWrite` / `defaultShell` | `true` / `false` | Powers a new row starts with |
+| `policy` | `true` | Whether the "when to use the hub" section rides in every agent's system prompt |
 | `outputLimit` | `4000` | Retained output tail per agent, in characters |
 | `feedLimit` | `200` | Feed items retained per board |
 | `coordinatorTimeoutMs` / `coordinatorMaxTokens` | `120000` / `4000` | Split call |
