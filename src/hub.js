@@ -31,6 +31,24 @@ import { publishPlan, readTeam, settleTask } from './team.js'
 /** Statuses from which an agent does not move on its own any more. */
 const TERMINAL_STATUSES = new Set(['done', 'error', 'stopped'])
 
+/**
+ * Keep only well-formed `provider/model` strings from a caller-supplied list.
+ *
+ * A malformed entry is dropped rather than rejected: the list is a preference
+ * about how to spread work, and refusing the whole launch because one entry had a
+ * trailing slash would make the flexible path the fragile one.
+ * @param {unknown} value - Candidate list.
+ * @returns {string[]} Valid routes, capped.
+ */
+function routeStringsOf(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter(entry => typeof entry === 'string')
+    .map(entry => entry.trim())
+    .filter(entry => entry.indexOf('/') > 0 && entry.indexOf('/') < entry.length - 1)
+    .slice(0, 24)
+}
+
 /** Statuses that mean "launched and still part of the run". */
 const LIVE_STATUSES = new Set(['queued', 'running', 'idle'])
 
@@ -130,6 +148,8 @@ export class Hub {
   #dirty = new Map()
   /** sessionId -> coalescing timer. */
   #timers = new Map()
+  /** Last route list read from the catalogue, for synchronously built prompts. */
+  #routes = []
 
   /**
    * @param {{ ctx: Record<string, any>, settings: Record<string, any> }} options - Plugin context and normalized config.
@@ -327,6 +347,7 @@ export class Hub {
       return { providers: [], hasLLM: false }
     }
     const providers = []
+    const routes = []
     for (const provider of llm.listProviders()) {
       let models = []
       try {
@@ -340,8 +361,21 @@ export class Hub {
         models = []
       }
       providers.push({ provider: provider.id, name: provider.name ?? provider.id, models })
+      for (const model of models) routes.push(`${provider.id}/${model.id}`)
     }
+    // Kept so the policy section can name the real options: a prompt assembled on
+    // every request cannot afford to await the catalogue, and an agent that does
+    // not know the routes cannot choose between providers.
+    this.#routes = routes
     return { providers, hasLLM: true }
+  }
+
+  /**
+   * The cached route list, refreshed by {@link catalog}.
+   * @returns {string[]} `provider/model` strings, empty until the first refresh.
+   */
+  routesSync() {
+    return this.#routes
   }
 
   /**
@@ -369,6 +403,9 @@ export class Hub {
         timeoutMs: this.settings.coordinatorTimeoutMs,
         signal: request.signal,
         defaults: { write: this.settings.defaultWrite, shell: this.settings.defaultShell },
+        // The caller's route shortlist, used only where the coordinator named
+        // none: explicit variety rather than every agent inheriting one model.
+        spread: routeStringsOf(request.models),
       })
     } catch (error) {
       // A model or transport failure is an upstream problem, not the caller's:
@@ -410,6 +447,25 @@ export class Hub {
     if (specs.length === 0) throw new HubError(400, 'agents 至少要有一个')
     if (specs.length > this.settings.maxAgents) {
       throw new HubError(400, `agents 最多 ${this.settings.maxAgents} 个，收到 ${specs.length} 个`)
+    }
+    // Fill rows that named no model from the caller's shortlist, before
+    // validation: "spread these three roles across these two providers" is the
+    // whole point of passing a list, and requiring each row to repeat one would
+    // make the roster path as rigid as it was before.
+    const spread = routeStringsOf(payload.models)
+    if (spread.length > 0) {
+      let next = 0
+      for (const spec of specs) {
+        if (spec === null || typeof spec !== 'object') continue
+        const chosen = typeof spec.model?.provider === 'string' && spec.model.provider !== ''
+          && typeof spec.model?.model === 'string' && spec.model.model !== ''
+        if (chosen) continue
+        const picked = routeStringsOf([spread[next % spread.length]])[0]
+        next += 1
+        if (picked === undefined) continue
+        const cut = picked.indexOf('/')
+        spec.model = { ...(spec.model ?? {}), provider: picked.slice(0, cut), model: picked.slice(cut + 1) }
+      }
     }
     for (const [index, spec] of specs.entries()) validateSpec(spec, index)
 

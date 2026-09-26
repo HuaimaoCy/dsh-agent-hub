@@ -91,7 +91,7 @@ export function parsePlanJson(text) {
  * task at all — shipping a role with no work would produce an agent that burns
  * tokens discovering it has nothing to do.
  * @param {Record<string, any>} plan - Parsed coordinator output.
- * @param {{ count: number, route: { provider: string, model: string }, defaults: { write: boolean, shell: boolean }, routes?: Set<string> }} options - Normalization inputs.
+ * @param {{ count: number, route: { provider: string, model: string }, defaults: { write: boolean, shell: boolean }, routes?: Set<string>, spread?: string[] }} options - Normalization inputs.
  * @returns {Record<string, any>[]} Agent rows.
  * @throws {Error} When no usable row remains.
  */
@@ -105,7 +105,7 @@ export function normalizeAgents(plan, options) {
     const role = typeof row.role === 'string' ? row.role.trim() : ''
     const task = typeof row.task === 'string' && row.task.trim() !== '' ? row.task.trim() : role
     if (task === '') continue
-    const model = pickRoute(row, options)
+    const model = pickRoute(row, options, index)
     agents.push({
       clientId: `a${index + 1}`,
       name,
@@ -138,6 +138,7 @@ export function normalizeAgents(plan, options) {
  * @param {number} request.timeoutMs - Deadline.
  * @param {AbortSignal} [request.signal] - Caller cancellation.
  * @param {{ write: boolean, shell: boolean }} request.defaults - Powers for rows that omit them.
+ * @param {string[]} [request.spread] - `provider/model` routes to distribute when a row names none.
  * @returns {Promise<{ agents: Record<string, any>[], usage: unknown, route: { provider: string, model: string } }>} Rows plus call metadata.
  */
 export async function draftPlan(request) {
@@ -147,6 +148,10 @@ export async function draftPlan(request) {
   }
   const deadline = withDeadline(request.signal, request.timeoutMs ?? DEFAULT_TIMEOUT_MS)
   try {
+    // Fetched once and used for three things: offered to the coordinator, validated
+    // against, and used as the spread fallback. Fetching it twice would let the two
+    // views disagree within a single split.
+    const routes = await routeList(request.ctx)
     const options = {
       provider: request.route.provider,
       model: request.route.model,
@@ -161,6 +166,7 @@ export async function draftPlan(request) {
             objective: request.objective,
             count: request.count,
             files: await workspaceHints(request.ctx),
+            routes,
           }),
         }],
       }],
@@ -187,7 +193,8 @@ export async function draftPlan(request) {
         count: request.count,
         route: request.route,
         defaults: request.defaults,
-        routes: await routeSet(request.ctx),
+        routes: new Set(routes),
+        spread: request.spread,
       }),
       usage,
       route: request.route,
@@ -222,21 +229,21 @@ async function workspaceHints(ctx) {
 }
 
 /**
- * Every `provider/model` the runtime advertises, for validating a suggestion.
+ * Every `provider/model` the runtime advertises, for offering and validating.
  * @param {Record<string, any>} ctx - Plugin context.
- * @returns {Promise<Set<string>>} Advertised routes.
+ * @returns {Promise<string[]>} Advertised routes, in provider order.
  */
-async function routeSet(ctx) {
-  const routes = new Set()
+async function routeList(ctx) {
+  const routes = []
   try {
     const llm = ctx.get?.('llm')
     if (llm === undefined || typeof llm.listProviders !== 'function') return routes
     for (const provider of llm.listProviders()) {
       try {
-        for (const model of await llm.listModels(provider.id)) routes.add(`${provider.id}/${model.id}`)
+        for (const model of await llm.listModels(provider.id)) routes.push(`${provider.id}/${model.id}`)
       } catch {
         // An unreachable provider contributes no routes; a suggestion naming it
-        // then falls back to the coordinator's own route instead of failing.
+        // then falls back instead of failing the whole split.
       }
     }
   } catch {
@@ -245,17 +252,45 @@ async function routeSet(ctx) {
   return routes
 }
 
-/** Pick a row's route: the model's suggestion when it is real, else the coordinators'. */
-function pickRoute(row, options) {
-  const provider = typeof row?.model?.provider === 'string' ? row.model.provider
-    : (typeof row?.provider === 'string' ? row.provider : '')
-  const model = typeof row?.model?.model === 'string' ? row.model.model
-    : (typeof row?.model === 'string' ? row.model : '')
+/** Split one `provider/model` string, or return nulls when it is not shaped like one. */
+function splitRoute(value) {
+  if (typeof value !== 'string') return { provider: '', model: '' }
+  const cut = value.indexOf('/')
+  if (cut <= 0 || cut === value.length - 1) return { provider: '', model: '' }
+  return { provider: value.slice(0, cut).trim(), model: value.slice(cut + 1).trim() }
+}
+
+/**
+ * Pick a row's route.
+ *
+ * Fallback order matters: a validated suggestion, then the caller's spread list,
+ * then the coordinator's own route. Without the middle step a coordinator that
+ * named no route — the common case, since most splits do not need variety — would
+ * put every agent on one model, and the team could not disagree with itself.
+ */
+function pickRoute(row, options, index) {
+  const raw = row?.model
+  let provider = ''
+  let model = ''
+  if (raw !== null && typeof raw === 'object') {
+    provider = typeof raw.provider === 'string' ? raw.provider : ''
+    model = typeof raw.model === 'string' ? raw.model : ''
+  } else {
+    // The coordinator is asked for one `provider/model` string, so the split
+    // happens here rather than depending on the model to emit an object.
+    ({ provider, model } = splitRoute(raw))
+  }
+  if (provider === '' && typeof row?.provider === 'string') provider = row.provider
   const effort = typeof row?.model?.reasoningEffort === 'string' ? row.model.reasoningEffort
     : (typeof row?.reasoningEffort === 'string' ? row.reasoningEffort : null)
-  if (provider !== '' && model !== '' && (options.routes === undefined || options.routes.size === 0
-    || options.routes.has(`${provider}/${model}`))) {
+  const known = options.routes === undefined || options.routes.size === 0
+  if (provider !== '' && model !== '' && (known || options.routes.has(`${provider}/${model}`))) {
     return { provider, model, reasoningEffort: effort }
+  }
+  const spread = Array.isArray(options.spread) ? options.spread.filter(entry => splitRoute(entry).provider !== '') : []
+  if (spread.length > 0) {
+    const picked = splitRoute(spread[Math.abs(Number(index) || 0) % spread.length])
+    return { provider: picked.provider, model: picked.model, reasoningEffort: effort }
   }
   return { provider: options.route.provider, model: options.route.model, reasoningEffort: effort }
 }

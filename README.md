@@ -104,6 +104,36 @@ The policy text rides on every request of every session in the deployment, so it
 can be switched off with `policy: false`; the board then exists purely as a UI
 surface.
 
+## Spreading work across providers
+
+Three levels, from least to most explicit:
+
+| You want | How |
+|---|---|
+| **A different model** to review the work | Name `provider` / `model` on that row; the policy tells the agent which routes exist |
+| To **spread** the work without picking row by row | Pass `models: ["provider/model", …]`; rows that name no model are assigned from it in turn |
+| The **coordinator** to assign per role | Pass nothing: the coordinator is given the catalogue and assigns (judgement-heavy roles get a stronger route, mechanical ones a cheaper one, and an **adversarial reviewer deliberately gets a different model**) |
+
+Three pieces make that work:
+
+1. **The policy section lists the available routes** (`可用模型路由（provider/model，共 N 条）：…`,
+   read live from the catalogue, capped at 12). Without it an agent has to invent route
+   names — and an invented route is dropped by validation, so the entire team silently
+   lands on one model with nothing reporting a problem.
+2. **The coordinator's request carries the catalogue**, with the instruction that `model`
+   must be copied exactly, and that one route for every role is the right answer when the
+   roles are alike: **do not manufacture variety**.
+3. **`hub_launch` takes `models`**: it fills rows of an explicit roster that name no model,
+   and it backstops the coordinator's rows when it named none. Malformed entries
+   (`broken/`, `/nope`) are dropped rather than failing the launch.
+
+> The gap this closed: the coordinator's prompt had **no model field at all** and nothing
+> told it which providers existed, so an auto-split team **always ran on one model**.
+> Per-row routes worked, but only if you wrote the roster yourself.
+
+A per-row route that no provider serves **fails that row's launch with the reason** (the
+other rows keep running) rather than being quietly replaced with another model.
+
 ## Relationship to the built-in Agent Teams
 
 The two overlap — a roster, a shared board, messages between members — so this is

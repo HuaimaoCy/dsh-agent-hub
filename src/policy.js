@@ -51,6 +51,7 @@ export const HUB_POLICY = [
   '',
   '**怎么用：**',
   '- 用 `hub_launch` 开台。只给目标，由协调者模型自动拆分角色；也可以直接指定角色与模型。',
+  '- 想让**不同模型**各司其职：在每行的 `provider` / `model` 里逐个指定（可选路由见下文）；只想把分工摊开而不逐个挑，就传 `models: ["provider/model", …]`，没指定模型的行由宿主轮流分配。`hub_launch` 的返回里会列出每个智能体实际用的路由。',
   '- 开台后立刻用一句话告诉用户「谁在做什么、在哪儿看」，然后继续做你自己那一份。',
   '- 想看同伴进展或读它们的产出用 `hub_read`；汇报自己的里程碑用 `hub_post`，它会实时出现在界面上。',
   '- 一个会话只维护一块台：已经有台在跑时，用 `hub_post` / `hub_read` 与它协作，不要再开一块。',
@@ -79,6 +80,23 @@ export function hubStatusLine(board) {
 }
 
 /**
+ * One compact line naming the routes this deployment actually advertises.
+ *
+ * Without it, an agent asked to spread work across models has to invent route
+ * names — and an invented route is dropped by validation, so the whole team
+ * silently lands on one model and nothing reports a problem. Capped because this
+ * text rides on every request.
+ * @param {string[]} routes - `provider/model` strings.
+ * @returns {string} The line, or an empty string when there is nothing to say.
+ */
+export function routesLine(routes) {
+  if (!Array.isArray(routes) || routes.length === 0) return ''
+  const shown = routes.slice(0, 12)
+  const rest = routes.length - shown.length
+  return `可用模型路由（provider/model，共 ${routes.length} 条）：${shown.join('、')}${rest > 0 ? ` 等 ${rest} 条` : ''}`
+}
+
+/**
  * Build the section text for one prompt assembly.
  * @param {import('./hub.js').Hub} hub - The hub.
  * @param {Record<string, any>} [context] - Assembly context carrying `agent.session.id`.
@@ -87,7 +105,13 @@ export function hubStatusLine(board) {
 export function hubPolicyText(hub, context) {
   const sessionId = context?.agent?.session?.id
   const board = typeof sessionId === 'string' && sessionId !== '' ? hub.peek(sessionId) : undefined
-  return [HUB_POLICY, '', hubStatusLine(board)].join('\n')
+  const routes = routesLine(hub.routesSync())
+  return [
+    HUB_POLICY,
+    '',
+    ...(routes === '' ? [] : [routes]),
+    hubStatusLine(board),
+  ].join('\n')
 }
 
 /**

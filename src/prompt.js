@@ -16,7 +16,7 @@ export const COORDINATOR_SYSTEM_PROMPT = [
   'Split the objective into independent roles that can work at the same time without editing the same files.',
   '',
   'Output ONLY one JSON object, no prose, no code fence:',
-  '{"agents":[{"name":"short name","role":"one line","task":"what this agent must produce","files":["path or glob it owns"],"write":true,"shell":false,"message":true}]}',
+  '{"agents":[{"name":"short name","role":"one line","task":"what this agent must produce","files":["path or glob it owns"],"write":true,"shell":false,"message":true,"model":"provider/model"}]}',
   '',
   'Rules:',
   '- Produce exactly the requested number of agents.',
@@ -24,20 +24,29 @@ export const COORDINATOR_SYSTEM_PROMPT = [
   '- `files` lists the paths or globs this agent owns. Two agents must never own the same path; if the objective cannot be split that way, make one agent the owner and give the others read-only review roles.',
   '- `write` is false for research, review, and analysis roles. `shell` is false unless the role genuinely must run commands to verify its own work.',
   '- `message` is true when the role benefits from handing findings to a peer.',
+  '- `model` assigns one route to this agent, copied EXACTLY from the list supplied in the request. Assign per role where it buys something: a stronger route for the part that needs judgement, a cheaper or faster one for mechanical work, and — most valuable — a DIFFERENT route for an adversarial reviewer, because a second model disagrees with the first far more usefully than the same model re-reading itself. Using one route for everything is the right answer when the roles are alike; do not manufacture variety.',
   '- Write `name`, `role`, and `task` in the language of the objective.',
   '- Do not invent facts about the repository; describe work, not its results.',
 ].join('\n')
 
 /**
  * Build the coordinator's user message.
- * @param {{ objective: string, count: number, files?: string[], language?: string }} input - Split input.
+ *
+ * The available routes are listed here rather than left to the model's knowledge,
+ * because a route it invents is dropped by validation and every agent then falls
+ * back to one model — the failure is silent and produces a team that cannot
+ * disagree with itself.
+ * @param {{ objective: string, count: number, files?: string[], routes?: string[] }} input - Split input.
  * @returns {string} User message text.
  */
-export function buildCoordinatorRequest({ objective, count, files = [] }) {
+export function buildCoordinatorRequest({ objective, count, files = [], routes = [] }) {
   return [
     `Objective: ${objective}`,
     `Number of agents required: ${count}`,
     ...(files.length === 0 ? [] : ['', `Files or directories already visible in the workspace: ${files.slice(0, 60).join(', ')}`]),
+    ...(routes.length === 0
+      ? []
+      : ['', `Model routes you may use for \`model\` (copy one exactly; use only these): ${routes.slice(0, 24).join(', ')}`]),
     '',
     'Return the JSON object now.',
   ].join('\n')

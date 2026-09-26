@@ -56,6 +56,7 @@ const OPERATIONS = {
       // Validated here rather than clamped inside the hub: a caller that asked
       // for 99 agents gets a 400, not a quiet 8.
       count: optionalCount(input.count, 'count'),
+      models: requireStringArray(input.models, 'models'),
       coordinator: input.coordinator,
       signal,
     }),
@@ -65,6 +66,7 @@ const OPERATIONS = {
     run: (hub, input, signal) => hub.launch(requireSession(input), {
       objective: input.objective,
       agents: requireArray(input.agents, 'agents'),
+      models: requireStringArray(input.models, 'models'),
       signal,
     }),
   },

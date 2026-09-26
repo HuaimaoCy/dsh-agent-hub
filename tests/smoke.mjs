@@ -1,4 +1,4 @@
-﻿/**
+/**
  * dsh-agent-hub smoke test.
  *
  * Drives the real Host half — the real `apply`, the real route handler, the real
@@ -1014,6 +1014,102 @@ await check('跨会话的台互相不可见', async () => {
   const own = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=session-other`)
   assert.equal(own.payload.result.objective, '另一个对话的目标')
   assert.equal(own.payload.result.sessionId, 'session-other')
+})
+
+console.log('\n按提供商灵活调配')
+await check('协调者被告知有哪些路由可选', async () => {
+  const response = await request(route, 'POST', `${ROUTE_PATH}?op=draft`, {
+    op: 'draft', sessionId, objective: '路由测试', count: 2,
+  }, { [MARKER_HEADER]: '1' })
+  assert.equal(response.status, 200)
+  const text = state.llmOptions.messages[0].content[0].text
+  // Without the catalogue in the request the coordinator has to invent route
+  // names; every invented one is dropped, and the whole team lands on one model.
+  assert.match(text, /deepseek-official\/deepseek-flash/)
+})
+await check('协调者输出 provider/model 字符串时会被拆开并采用', async () => {
+  const original = state.llmReply
+  state.llmReply = JSON.stringify({ agents: [
+    { name: '甲', role: 'r', task: 't', model: 'deepseek-official/deepseek-flash' },
+  ] })
+  try {
+    const response = await request(route, 'POST', `${ROUTE_PATH}?op=draft`, {
+      op: 'draft', sessionId, objective: '路由测试', count: 1,
+    }, { [MARKER_HEADER]: '1' })
+    const agent = response.payload.result.draft.agents[0]
+    assert.equal(agent.model.provider, 'deepseek-official')
+    assert.equal(agent.model.model, 'deepseek-flash')
+  } finally {
+    state.llmReply = original
+  }
+})
+await check('协调者编造的路由被丢弃，回落到可用路由', async () => {
+  const original = state.llmReply
+  state.llmReply = JSON.stringify({ agents: [
+    { name: '甲', role: 'r', task: 't', model: 'nope/not-a-model' },
+  ] })
+  try {
+    const response = await request(route, 'POST', `${ROUTE_PATH}?op=draft`, {
+      op: 'draft', sessionId, objective: '路由测试', count: 1,
+    }, { [MARKER_HEADER]: '1' })
+    assert.equal(response.payload.result.draft.agents[0].model.model, 'deepseek-flash')
+  } finally {
+    state.llmReply = original
+  }
+})
+await check('传 models 时，没指定模型的行被轮流分配', async () => {
+  const original = state.llmReply
+  state.llmReply = JSON.stringify({ agents: [
+    { name: '甲', role: 'r1', task: 't1' }, { name: '乙', role: 'r2', task: 't2' },
+    { name: '丙', role: 'r3', task: 't3' }, { name: '丁', role: 'r4', task: 't4' },
+  ] })
+  try {
+    const response = await request(route, 'POST', `${ROUTE_PATH}?op=draft`, {
+      op: 'draft', sessionId, objective: '摊开', count: 4,
+      models: ['deepseek-official/deepseek-flash', 'zai-coding-cn/glm-4.6v'],
+    }, { [MARKER_HEADER]: '1' })
+    const models = response.payload.result.draft.agents.map(agent => `${agent.model.provider}/${agent.model.model}`)
+    assert.deepEqual(models, [
+      'deepseek-official/deepseek-flash', 'zai-coding-cn/glm-4.6v',
+      'deepseek-official/deepseek-flash', 'zai-coding-cn/glm-4.6v',
+    ])
+  } finally {
+    state.llmReply = original
+  }
+})
+await check('hub_launch 的名册可以只给一部分模型，其余由 models 补齐', async () => {
+  const before = state.startCalls.length
+  const tool = harness.tools.registered.get('hub_launch')
+  await tool.execute({
+    objective: '补齐',
+    models: ['zai-coding-cn/glm-4.6v'],
+    agents: [
+      { name: '甲', task: 't1', provider: 'deepseek-official', model: 'deepseek-flash' },
+      { name: '乙', task: 't2' },
+    ],
+  }, { agent: parentAgent, signal: new AbortController().signal })
+  const calls = state.startCalls.slice(before)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(calls[0].request.agentOptions, { provider: 'deepseek-official', model: 'deepseek-flash' })
+  assert.deepEqual(calls[1].request.agentOptions, { provider: 'zai-coding-cn', model: 'glm-4.6v' })
+})
+await check('格式错的路由被丢掉，而不是让整次派发失败', async () => {
+  const before = state.startCalls.length
+  const tool = harness.tools.registered.get('hub_launch')
+  await tool.execute({
+    objective: '容错',
+    models: ['broken/', '/nope', 'zai-coding-cn/glm-4.6v'],
+    agents: [{ name: '甲', task: 't1' }],
+  }, { agent: parentAgent, signal: new AbortController().signal })
+  const calls = state.startCalls.slice(before)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].request.agentOptions, { provider: 'zai-coding-cn', model: 'glm-4.6v' })
+})
+await check('策略里列出可用路由，lead 才有的选', async () => {
+  await request(route, 'GET', `${ROUTE_PATH}?op=models`)
+  const text = state.policySections[0].text({ agent: { session: { id: sessionId } } })
+  assert.match(text, /可用模型路由/)
+  assert.match(text, /deepseek-official\/deepseek-flash/)
 })
 
 console.log('\n实时流')

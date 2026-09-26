@@ -152,8 +152,8 @@ data: {"sessionId":"…","agents":[…],"feed":[…],"phase":"running"}
 
 | op | body | result |
 |---|---|---|
-| `draft` | `{ sessionId, objective, count?, coordinator?: {provider, model} }` | `{ draft, usage }` |
-| `launch` | `{ sessionId, objective, agents: [草案里的 agent] }` | `{ agents: [AgentCard] }` |
+| `draft` | `{ sessionId, objective, count?, models?, coordinator?: {provider, model} }` | `{ draft, usage }` |
+| `launch` | `{ sessionId, objective, agents: [草案里的 agent], models? }` | `{ agents: [AgentCard] }` |
 | `steer` | `{ sessionId, agentId, text, delivery?: "queue"\|"steer" }` | `{ accepted: true, messageId }` |
 | `broadcast` | `{ sessionId, text, to?: [agentId] }` | `{ accepted: true, delivered: n }` |
 | `interrupt` | `{ sessionId, agentId }` | `{ accepted: true }` |
@@ -168,6 +168,7 @@ data: {"sessionId":"…","agents":[…],"feed":[…],"phase":"running"}
 - **子智能体不能开台或清台**（`draft` / `launch` / `clear` 返回 409）：它已经是某个会话的子智能体，只能与那块台上的同伴协作。被替换掉（重新派发或清台）的直接子智能体失去访问，报"不在任何协作台上"。
 - **所有写操作的必填字段都要显式校验**；缺字段或类型不对返回 `400` 并带可读 `error`，不要静默回退默认值。
 - `launch` 的 `agents` 至少 1 个、至多 8 个。
+- `models` 是可选的 `provider/model` 字符串数组（最多 24 条）：`draft` 用它给"协调者没指定模型"的行轮流兜底，`launch` 用它补齐名册里没写模型的行。格式不合规的条目**丢弃**，不让整次派发失败；但合规而提供商不服务的路由会让**那一行**启动失败并写明原因。
 - `draft` 需要宿主有 `llm` 服务；没有则返回 `503` 与"无法调用协调者模型"。
 - 智能体没启动（`draft` 状态）时 `steer`/`interrupt` 返回 `409`。
 - 未知 `op` 返回 `404`。

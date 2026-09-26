@@ -164,6 +164,13 @@ function hubLaunchTool(hub) {
       properties: {
         objective: { type: 'string', description: 'The single objective the whole team shares, stated once.' },
         count: { type: 'number', description: 'How many agents the coordinator should create (default 4). Ignored when `agents` is given.' },
+        models: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional `provider/model` shortlist (for example ["deepseek-official/deepseek-flash","zai-coding-cn/glm-4.7"]). '
+            + 'Rows that name no model are assigned from it in turn, so a team can work across providers without every row repeating a route. '
+            + 'Use the routes listed in your system prompt: a route no provider serves fails that row\'s launch rather than being silently replaced.',
+        },
         agents: {
           type: 'array',
           description: 'An explicit roster. When present the coordinator is skipped and exactly these are launched.',
@@ -197,12 +204,17 @@ function hubLaunchTool(hub) {
       }
       const objective = String(args?.objective ?? '').trim()
       if (objective === '') throw new Error('objective 不能为空')
+      const models = Array.isArray(args?.models) ? args.models : undefined
       const roster = Array.isArray(args?.agents) && args.agents.length > 0
         ? args.agents.map(rosterRowOf)
-        : (await hub.draft(sessionId, { objective, count: args?.count, signal: exec?.signal })).draft.agents
+        : (await hub.draft(sessionId, { objective, count: args?.count, models, signal: exec?.signal })).draft.agents
       // `exec.agent` is the exact live agent making the call, so the launch does
       // not have to look a parent up by session id and cannot come back empty.
-      const launched = await hub.launch(sessionId, { objective, agents: roster, signal: exec?.signal }, { parent: exec?.agent })
+      const launched = await hub.launch(
+        sessionId,
+        { objective, agents: roster, models, signal: exec?.signal },
+        { parent: exec?.agent },
+      )
       return describeLaunch(launched.agents)
     },
   }
