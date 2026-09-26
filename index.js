@@ -57,11 +57,10 @@ export function apply(ctx, config) {
     throw new Error(`dsh-agent-hub: 配置无效 — ${detail}`)
   }
   const hub = new Hub({ ctx, settings: validated.value })
-  // Warm the route cache so the policy section can name the real provider/model
-  // options: a prompt is assembled synchronously, so it cannot afford to await the
-  // catalogue. A read that fails here leaves it empty and the panel's own
-  // `op=models` refills it.
-  void hub.catalog().catch(() => {})
+  // Best-effort, and deliberately not the only attempt: this usually loses the race
+  // with the `llm` service's own composition, which is why `hubPolicyText` also
+  // kicks a shared refresh whenever it finds the cache empty.
+  void hub.warmRoutes()
   ctx.effect(() => {
     const stops = [
       observeHub(ctx, hub),

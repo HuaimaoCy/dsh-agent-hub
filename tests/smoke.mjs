@@ -25,6 +25,7 @@ import { buildAgentPersona, buildAgentPrompt } from '../src/prompt.js'
 import { finishError, normalizeAgents, parsePlanJson } from '../src/llm.js'
 import { formatBoard } from '../src/tools.js'
 import { MARKER_HEADER, openStream, ROUTE_PATH } from '../src/http.js'
+import { hubPolicyText } from '../src/policy.js'
 
 process.on('unhandledRejection', (reason) => {
   console.error('FAIL unhandled rejection in the suite:', reason)
@@ -1110,6 +1111,23 @@ await check('策略里列出可用路由，lead 才有的选', async () => {
   const text = state.policySections[0].text({ agent: { session: { id: sessionId } } })
   assert.match(text, /可用模型路由/)
   assert.match(text, /deepseek-official\/deepseek-flash/)
+})
+await check('路由缓存冷启动会自愈（否则 lead 永远看不到可选路由）', async () => {
+  // Warming at load loses the race with the `llm` service's own composition, so a
+  // cold cache must heal itself from the code path that needs it. Without this the
+  // whole "pick a provider" feature is silently unavailable on a fresh process —
+  // which is exactly how it shipped once.
+  const fresh = new Hub({
+    ctx: harness.ctx,
+    settings: { maxAgents: 8, defaultWrite: true, defaultShell: false, outputLimit: 100, feedLimit: 10, policy: true },
+  })
+  assert.deepEqual(fresh.routesSync(), [])
+  const cold = hubPolicyText(fresh, { agent: { session: { id: sessionId } } })
+  assert.ok(!cold.includes('可用模型路由'), 'a cold cache has nothing to name yet')
+  // The assembly kicks a shared refresh instead of waiting on the catalogue.
+  await wait(80)
+  assert.ok(fresh.routesSync().length > 0, 'the next assembly must already have the routes')
+  assert.match(hubPolicyText(fresh, { agent: { session: { id: sessionId } } }), /可用模型路由/)
 })
 
 console.log('\n实时流')

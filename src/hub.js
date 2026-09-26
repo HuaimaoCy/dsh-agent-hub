@@ -150,6 +150,8 @@ export class Hub {
   #timers = new Map()
   /** Last route list read from the catalogue, for synchronously built prompts. */
   #routes = []
+  /** In-flight route refresh, so prompt assembly cannot start one per request. */
+  #warming = null
 
   /**
    * @param {{ ctx: Record<string, any>, settings: Record<string, any> }} options - Plugin context and normalized config.
@@ -376,6 +378,24 @@ export class Hub {
    */
   routesSync() {
     return this.#routes
+  }
+
+  /**
+   * Refresh the route cache, sharing one in-flight read.
+   *
+   * Warming at load is not enough on its own: the catalogue is composed
+   * asynchronously and may not exist yet when this plugin loads, which leaves the
+   * cache empty for the rest of the process — and an agent that is told nothing
+   * about which models exist can only invent route names. Anything that notices
+   * the cache is empty calls this, and concurrent callers share the read.
+   * @returns {Promise<void>} Resolves once the cache is refreshed, or after a read that failed.
+   */
+  warmRoutes() {
+    if (this.#warming !== null) return this.#warming
+    this.#warming = this.catalog()
+      .catch(() => {})
+      .finally(() => { this.#warming = null })
+    return this.#warming
   }
 
   /**

@@ -106,6 +106,13 @@ export function hubPolicyText(hub, context) {
   const sessionId = context?.agent?.session?.id
   const board = typeof sessionId === 'string' && sessionId !== '' ? hub.peek(sessionId) : undefined
   const routes = routesLine(hub.routesSync())
+  // Self-healing. Warming the catalogue at load is not reliable — the `llm`
+  // service is composed asynchronously and may not exist yet when this plugin
+  // loads — so a cold cache would otherwise stay cold for the life of the
+  // process and agents would keep being told nothing about which models exist.
+  // The refresh is fire-and-forget and shared, so the next assembly already names
+  // the routes instead of this one waiting on a catalogue read.
+  if (routes === '') void hub.warmRoutes()
   return [
     HUB_POLICY,
     '',
