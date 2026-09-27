@@ -188,8 +188,8 @@ function hubLaunchTool(hub) {
               provider: { type: 'string', description: 'LLM provider id, for example deepseek-official.' },
               model: { type: 'string', description: 'Model id within that provider.' },
               files: { type: 'array', items: { type: 'string' }, description: 'Paths or globs this agent owns. Must not overlap another row.' },
-              write: { type: 'boolean', description: 'May modify files. Defaults to false.' },
-              shell: { type: 'boolean', description: 'May run commands. Defaults to false.' },
+              write: { type: 'boolean', description: 'May modify files. Defaults to the plugin\'s `defaultWrite` setting (true unless configured otherwise), so omit it unless this row must be read-only.' },
+              shell: { type: 'boolean', description: 'May run commands. Defaults to the plugin\'s `defaultShell` setting (false unless configured otherwise).' },
               message: { type: 'boolean', description: 'May post to the board and message peers. Defaults to true.' },
             },
             required: ['name', 'task', 'provider', 'model'],
@@ -211,7 +211,7 @@ function hubLaunchTool(hub) {
       if (objective === '') throw new Error('objective 不能为空')
       const models = Array.isArray(args?.models) ? args.models : undefined
       const roster = Array.isArray(args?.agents) && args.agents.length > 0
-        ? args.agents.map(rosterRowOf)
+        ? args.agents.map(row => rosterRowOf(row, hub.settings))
         : (await hub.draft(sessionId, { objective, count: args?.count, models, signal: exec?.signal })).draft.agents
       // `exec.agent` is the exact live agent making the call, so the launch does
       // not have to look a parent up by session id and cannot come back empty.
@@ -228,13 +228,19 @@ function hubLaunchTool(hub) {
 /**
  * Map one tool-supplied roster row into the shape `Hub.launch` expects.
  *
- * Powers default to **off** here, unlike a UI-authored row: a model that did not
- * say `write: true` should not get a writing agent by accident. `message` is the
- * exception — the board is the point, so it defaults on.
+ * Powers fall back to the plugin's configured defaults, exactly as a panel-authored
+ * row does. They used to be hardcoded off, which meant this path quietly produced
+ * read-only agents while the panel produced writable ones — one plugin with two
+ * contradictory defaults, and a model had to know to write `write: true` on every
+ * line to get an agent that could do the job. `message` stays on by default: the
+ * board is the point.
  * @param {Record<string, any>} row - Row from the tool call.
+ * @param {{ defaultWrite?: boolean, defaultShell?: boolean }} [defaults] - Plugin settings.
  * @returns {Record<string, any>} Card-shaped spec.
  */
-function rosterRowOf(row) {
+function rosterRowOf(row, defaults = {}) {
+  const defaultWrite = defaults.defaultWrite === undefined ? true : defaults.defaultWrite === true
+  const defaultShell = defaults.defaultShell === true
   return {
     name: typeof row?.name === 'string' ? row.name : undefined,
     role: typeof row?.role === 'string' ? row.role : '',
@@ -245,7 +251,11 @@ function rosterRowOf(row) {
       model: typeof row?.model === 'string' ? row.model.trim() : '',
       reasoningEffort: typeof row?.reasoningEffort === 'string' ? row.reasoningEffort : null,
     },
-    powers: { write: row?.write === true, shell: row?.shell === true, message: row?.message !== false },
+    powers: {
+      write: row?.write === undefined ? defaultWrite : row.write === true,
+      shell: row?.shell === undefined ? defaultShell : row.shell === true,
+      message: row?.message === undefined ? true : row.message === true,
+    },
   }
 }
 

@@ -19,7 +19,7 @@
 import assert from 'node:assert/strict'
 
 import { apply as loadPlugin, Config, inject, name } from '../index.js'
-import { createCard, findPeer, Hub, HubError, messageOf, phaseOf, textFromBlocks } from '../src/hub.js'
+import { createCard, findPeer, Hub, HubError, messageOf, phaseOf, textFromBlocks, toolFilterOf } from '../src/hub.js'
 import { normalizeConfig } from '../src/config.js'
 import { buildAgentPersona, buildAgentPrompt } from '../src/prompt.js'
 import { finishError, normalizeAgents, parsePlanJson } from '../src/llm.js'
@@ -597,6 +597,36 @@ await check('权限映射：只读角色使用白名单', () => {
   assert.ok(Array.isArray(filter.allow), 'expected an allow list')
   assert.ok(filter.allow.includes('hub_post'))
   assert.ok(!filter.allow.includes('write'))
+})
+await check('只读在有写工具时是"精确拒绝"，不是白名单（白名单会砍掉无关工具）', () => {
+  // The live registry does have write/edit/pwsh. An allow-list then stripped every
+  // tool it did not name — job control, team tasks, other plugins — which is what
+  // made dispatched agents report missing tools.
+  const registry = { get: name => (['read', 'glob', 'grep', 'write', 'edit', 'pwsh', 'job_kill', 'team_task_list'].includes(name) ? {} : undefined) }
+  const readOnly = toolFilterOf({ write: false, shell: false }, registry)
+  assert.deepEqual(readOnly, { deny: ['write', 'edit', 'pwsh'] })
+  assert.ok(readOnly.allow === undefined, 'a deny-list must not also carry an allow-list')
+  // Write without shell denies only the shell tools.
+  assert.deepEqual(toolFilterOf({ write: true, shell: false }, registry), { deny: ['pwsh'] })
+  // Both granted: no restriction at all.
+  assert.equal(toolFilterOf({ write: true, shell: true }, registry), undefined)
+  // No recognisable write tool: fall back to the whitelist, never to "no restriction".
+  const hubOnly = { get: name => (['hub_post', 'hub_read'].includes(name) ? {} : undefined) }
+  const fallback = toolFilterOf({ write: false, shell: false }, hubOnly)
+  assert.deepEqual(fallback, { allow: ['hub_post', 'hub_read'] })
+})
+await check('工具路径省略 write 时跟随插件设置，而不是默认只读', async () => {
+  // `rosterRowOf` used to hardcode powers off, so every tool-supplied row was
+  // read-only while the panel's rows were writable — one plugin, two defaults.
+  const before = state.startCalls.length
+  const tool = harness.tools.registered.get('hub_launch')
+  const text = await tool.execute({
+    objective: '默认权限',
+    agents: [{ name: '隐式写', task: 't1', provider: 'deepseek-official', model: 'deepseek-flash' }],
+  }, { agent: parentAgent, signal: new AbortController().signal })
+  const spec = state.startCalls[before].request
+  assert.equal(spec.toolFilter, undefined, 'write defaults on, so the row is unrestricted')
+  assert.match(text, /隐式写/)
 })
 await check('launch 后 phase 为 running，feed 有启动记录', async () => {
   const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)

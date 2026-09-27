@@ -28,6 +28,48 @@ import { draftPlan } from './llm.js'
 import { buildAgentPrompt, buildAgentPersona } from './prompt.js'
 import { publishPlan, readTeam, settleTask } from './team.js'
 
+/**
+ * Translate the powers a card asked for into a tool restriction.
+ *
+ * Pure and exported so the policy is testable without a live registry: a restriction
+ * may only name tools the runtime actually registers, because `tools.restrict()`
+ * throws on anything else.
+ *
+ * A read-only request becomes a **deny-list** of the write and shell tools we can see.
+ * It used to be an allow-list, which silently amputated every tool it did not name —
+ * a read-only agent also lost job control, team tasks, and anything another plugin
+ * registered. That is not what "read-only" means, and it is why dispatched agents
+ * reported missing tools. The allow-list survives as the fallback for a registry where
+ * no write tool is recognisable at all: there a deny-list would deny nothing and hand
+ * out write access, the one outcome a read-only request must never produce.
+ * @param {{ write?: boolean, shell?: boolean }} powers - Requested powers.
+ * @param {{ get?: (name: string) => unknown }|undefined} tools - Live tool registry.
+ * @returns {{ allow?: string[], deny?: string[] }|undefined} Restriction, or undefined for none.
+ */
+export function toolFilterOf(powers, tools) {
+  const present = name => {
+    try {
+      return tools?.get?.(name) !== undefined
+    } catch {
+      return false
+    }
+  }
+  const existing = names => names.filter(present)
+  const write = powers?.write === true
+  const shell = powers?.shell === true
+  if (write && shell) return undefined
+  const danger = [
+    ...(write ? [] : existing(WRITE_TOOLS)),
+    ...(shell ? [] : existing(SHELL_TOOLS)),
+  ]
+  if (danger.length > 0) return { deny: danger }
+  if (!write && !shell) {
+    const allow = existing(READ_ONLY_TOOLS)
+    if (allow.length > 0) return { allow }
+  }
+  return undefined
+}
+
 /** Statuses from which an agent does not move on its own any more. */
 const TERMINAL_STATUSES = new Set(['done', 'error', 'stopped'])
 
@@ -1159,24 +1201,7 @@ export class Hub {
    * never loads a shell tool would break every launch.
    */
   #toolFilter(powers) {
-    const tools = this.ctx.get?.('tools')
-    const present = name => {
-      try {
-        return tools?.get?.(name) !== undefined
-      } catch {
-        return false
-      }
-    }
-    const existing = names => names.filter(present)
-    if (powers.write && powers.shell) return undefined
-    if (!powers.write && !powers.shell) {
-      // A whitelist is the only honest "read-only": enumerating every write
-      // tool that might exist somewhere is not possible, so deny by default.
-      const allow = existing(READ_ONLY_TOOLS)
-      return allow.length > 0 ? { allow } : { deny: existing([...WRITE_TOOLS, ...SHELL_TOOLS]) }
-    }
-    const deny = existing(powers.write ? SHELL_TOOLS : [...WRITE_TOOLS, ...SHELL_TOOLS])
-    return deny.length > 0 ? { deny } : undefined
+    return toolFilterOf(powers, this.ctx.get?.('tools'))
   }
 
   /** Deliver one message into a child's inbox through the live parent. */
