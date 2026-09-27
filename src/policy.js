@@ -21,6 +21,7 @@
  */
 
 import { phaseOf } from './hub.js'
+import { tierTagOf } from './catalog.js'
 
 /**
  * The policy text.
@@ -86,16 +87,19 @@ export function hubStatusLine(board) {
  *
  * Without it, an agent asked to spread work across models has to invent route
  * names — and an invented route is dropped by validation, so the whole team
- * silently lands on one model and nothing reports a problem. Capped because this
- * text rides on every request.
+ * silently lands on one model and nothing reports a problem. Each route also
+ * carries its cost tier (builtin estimate), because an agent told only names
+ * tends to pick the most prestigious one. Capped because this text rides on
+ * every request.
  * @param {string[]} routes - `provider/model` strings.
+ * @param {Record<string, Record<string, any>>} [routeMeta] - Operator overrides, so these tiers match the coordinator's.
  * @returns {string} The line, or an empty string when there is nothing to say.
  */
-export function routesLine(routes) {
+export function routesLine(routes, routeMeta) {
   if (!Array.isArray(routes) || routes.length === 0) return ''
-  const shown = routes.slice(0, 12)
+  const shown = routes.slice(0, 12).map(route => `${route}${tierTagOf(route, routeMeta)}`)
   const rest = routes.length - shown.length
-  return `可用模型路由（provider/model，共 ${routes.length} 条）：${shown.join('、')}${rest > 0 ? ` 等 ${rest} 条` : ''}`
+  return `可用模型路由（provider/model，共 ${routes.length} 条，括注为成本档位：机械批量任务用低价档，判断密集任务才用高价档）：${shown.join('、')}${rest > 0 ? ` 等 ${rest} 条` : ''}`
 }
 
 /**
@@ -107,7 +111,7 @@ export function routesLine(routes) {
 export function hubPolicyText(hub, context) {
   const sessionId = context?.agent?.session?.id
   const board = typeof sessionId === 'string' && sessionId !== '' ? hub.peek(sessionId) : undefined
-  const routes = routesLine(hub.routesSync())
+  const routes = routesLine(hub.routesSync(), hub.settings?.routeMeta)
   // Self-healing. Warming the catalogue at load is not reliable — the `llm`
   // service is composed asynchronously and may not exist yet when this plugin
   // loads — so a cold cache would otherwise stay cold for the life of the

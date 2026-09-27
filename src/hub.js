@@ -499,6 +499,7 @@ export class Hub {
         // The caller's route shortlist, used only where the coordinator named
         // none: explicit variety rather than every agent inheriting one model.
         spread: routeStringsOf(request.models),
+        routeMeta: this.settings.routeMeta,
       })
     } catch (error) {
       // A model or transport failure is an upstream problem, not the caller's:

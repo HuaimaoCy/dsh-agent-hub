@@ -161,8 +161,31 @@ pnpm run start:web
 | `feedLimit` | `200` | 进度板保留条数 |
 | `coordinatorTimeoutMs` | `120000` | 拆分调用超时 |
 | `coordinatorMaxTokens` | `4000` | 拆分调用输出上限 |
+| `routeMeta` | `{}` | 对内置路由元数据（定价／额度档位／擅长／边界）的逐条覆盖，见下节 |
 
 非法值在**装载期**就报错，不会静默回退。
+
+## 成本感知的模型选择
+
+协调者在拆分时看到的不再是裸的 `provider/model` 列表：每条路由后面跟着它的**成本**（估价或订阅制）、**额度档位**（充裕／一般／紧张）、**擅长**与**边界**，系统提示要求它按「机械批量任务用低价档、判断密集任务才用高价档、额度紧张的路由每队最多一两个、不把角色派给边界不覆盖它的模型」来分配。这些元数据来自 `src/catalog.js` 的内置估价表，是**静态估计**。
+
+用 `routeMeta` 按部署修正（键可以是完整 `provider/model`，也可以只写 provider 作兜底；字段可只给需要改的，其余沿用内置值）：
+
+```yaml
+agent-hub:
+  routeMeta:
+    codex-chatgpt/gpt-6-astra:
+      quota: thin          # ample | normal | thin
+      metered: false       # 订阅制时不按 token 计价
+    deepseek-official/deepseek-flash:
+      in: 0.1              # 每百万 token 输入价（USD，估计）
+      out: 0.4             # 每百万 token 输出价
+      tier: cheap          # free | cheap | mid | high
+      strengths: 快速批量任务
+      boundaries: 不做架构裁决
+```
+
+策略段落里的路由清单同样会括注成本档位，让主智能体在写 `models:` 短名单时也带着成本意识。协调者如果把整行批注原样抄回，`splitRoute` 会剥掉 `｜` 之后的部分再校验，不会因此失效。
 
 ## 数据存在哪
 

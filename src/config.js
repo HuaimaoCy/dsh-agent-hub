@@ -37,6 +37,16 @@ export const DEFAULT_CONFIG = {
   coordinatorTimeoutMs: 120000,
   /** Output cap for the coordinator split call. */
   coordinatorMaxTokens: 4000,
+  /**
+   * Operator corrections to the built-in route metadata, keyed by exact
+   * `provider/model` (or provider alone). Each entry may set `in` / `out`
+   * (USD per million tokens), `metered: false` for subscription routes,
+   * `tier` (`free|cheap|mid|high`), `quota` (`ample|normal|thin`),
+   * `strengths`, `boundaries`. Values are merged over the built-in estimates,
+   * so an operator with real prices or live quota posture can correct the
+   * coordinator's assignment input without touching code.
+   */
+  routeMeta: {},
 }
 
 /** Options this plugin accepts; anything else is rejected. */
@@ -65,6 +75,14 @@ export function normalizeConfig(raw) {
         continue
       }
       value.provider = entry.trim()
+      continue
+    }
+    if (key === 'routeMeta') {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        issues.push({ message: 'routeMeta must be an object keyed by provider/model', path: [key] })
+        continue
+      }
+      value.routeMeta = entry
       continue
     }
     if (key === 'defaultWrite' || key === 'defaultShell' || key === 'policy') {

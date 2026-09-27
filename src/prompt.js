@@ -24,7 +24,12 @@ export const COORDINATOR_SYSTEM_PROMPT = [
   '- `files` lists the paths or globs this agent owns. Two agents must never own the same path; if the objective cannot be split that way, make one agent the owner and give the others read-only review roles.',
   '- `write` is false for research, review, and analysis roles. `shell` is false unless the role genuinely must run commands to verify its own work.',
   '- `message` is true when the role benefits from handing findings to a peer.',
-  '- `model` assigns one route to this agent, copied EXACTLY from the list supplied in the request. Assign per role where it buys something: a stronger route for the part that needs judgement, a cheaper or faster one for mechanical work, and — most valuable — a DIFFERENT route for an adversarial reviewer, because a second model disagrees with the first far more usefully than the same model re-reading itself. Using one route for everything is the right answer when the roles are alike; do not manufacture variety.',
+  '- `model` assigns one route to this agent, copied EXACTLY from the route id before the first `｜` in the supplied list. Assign per role where it buys something, weighing cost, remaining quota and capability:',
+  '  - **Match capability, not prestige.** Bulk mechanical work (formatting, checklist sweeps, simple retrieval) goes to a cheap/fast route; judgement-heavy work (architecture decisions, tricky debugging, final review) earns a strong route. Paying flagship prices for mechanical rows wastes quota that the judgement roles need.',
+  '  - **Respect quota posture.** A route marked 额度紧张 must not be given to more than one or two roles per team, and never to bulk roles; spread bulk work across routes marked 额度充裕／一般.',
+  '  - **Respect boundaries.** A route whose 边界 says it cannot do something (vision, deep reasoning) must not receive that role.',
+  '  - **Use strengths.** Prefer a route whose 擅长 names the role\'s actual work.',
+  '  - A DIFFERENT route for an adversarial reviewer is still the most valuable variety: a second model disagrees far more usefully than the same model re-reading itself. Using one route for everything remains correct when the roles are alike; do not manufacture variety.',
   '- Write `name`, `role`, and `task` in the language of the objective.',
   '- Do not invent facts about the repository; describe work, not its results.',
 ].join('\n')
@@ -35,8 +40,10 @@ export const COORDINATOR_SYSTEM_PROMPT = [
  * The available routes are listed here rather than left to the model's knowledge,
  * because a route it invents is dropped by validation and every agent then falls
  * back to one model — the failure is silent and produces a team that cannot
- * disagree with itself.
- * @param {{ objective: string, count: number, files?: string[], routes?: string[] }} input - Split input.
+ * disagree with itself. Each line carries the route id followed by cost, quota
+ * posture, strengths and boundaries, so the choice can weigh price and
+ * capability instead of prestige.
+ * @param {{ objective: string, count: number, files?: string[], routes?: string[] }} input - Split input; `routes` entries may be pre-annotated.
  * @returns {string} User message text.
  */
 export function buildCoordinatorRequest({ objective, count, files = [], routes = [] }) {
@@ -46,7 +53,11 @@ export function buildCoordinatorRequest({ objective, count, files = [], routes =
     ...(files.length === 0 ? [] : ['', `Files or directories already visible in the workspace: ${files.slice(0, 60).join(', ')}`]),
     ...(routes.length === 0
       ? []
-      : ['', `Model routes you may use for \`model\` (copy one exactly; use only these): ${routes.slice(0, 24).join(', ')}`]),
+      : [
+          '',
+          'Model routes you may use for `model` (copy the route id before the first ｜ EXACTLY; use only these; each line states cost / 额度 quota / 擅长 strengths / 边界 boundaries — these are estimates, trust the operator\'s values when they differ):',
+          ...routes.slice(0, 24).map(route => `- ${route}`),
+        ]),
     '',
     'Return the JSON object now.',
   ].join('\n')

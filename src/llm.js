@@ -12,6 +12,7 @@
  */
 
 import { COORDINATOR_SYSTEM_PROMPT, buildCoordinatorRequest } from './prompt.js'
+import { annotateRoutes } from './catalog.js'
 
 /** How long one coordinator call may take, when the caller gives no deadline. */
 const DEFAULT_TIMEOUT_MS = 120000
@@ -139,6 +140,7 @@ export function normalizeAgents(plan, options) {
  * @param {AbortSignal} [request.signal] - Caller cancellation.
  * @param {{ write: boolean, shell: boolean }} request.defaults - Powers for rows that omit them.
  * @param {string[]} [request.spread] - `provider/model` routes to distribute when a row names none.
+ * @param {Record<string, Record<string, any>>} [request.routeMeta] - Operator corrections merged into the built-in route metadata.
  * @returns {Promise<{ agents: Record<string, any>[], usage: unknown, route: { provider: string, model: string } }>} Rows plus call metadata.
  */
 export async function draftPlan(request) {
@@ -166,7 +168,9 @@ export async function draftPlan(request) {
             objective: request.objective,
             count: request.count,
             files: await workspaceHints(request.ctx),
-            routes,
+            // Annotated so the coordinator can weigh cost, quota and capability;
+            // validation below still runs on the raw ids the plan must name.
+            routes: annotateRoutes(routes, request.routeMeta),
           }),
         }],
       }],
@@ -255,9 +259,12 @@ async function routeList(ctx) {
 /** Split one `provider/model` string, or return nulls when it is not shaped like one. */
 function splitRoute(value) {
   if (typeof value !== 'string') return { provider: '', model: '' }
-  const cut = value.indexOf('/')
-  if (cut <= 0 || cut === value.length - 1) return { provider: '', model: '' }
-  return { provider: value.slice(0, cut).trim(), model: value.slice(cut + 1).trim() }
+  // The coordinator is offered annotated lines (`route｜成本：…`); if it echoes
+  // one back instead of the bare id, recover the id by dropping the annotation.
+  const bare = value.split('｜', 1)[0].trim()
+  const cut = bare.indexOf('/')
+  if (cut <= 0 || cut === bare.length - 1) return { provider: '', model: '' }
+  return { provider: bare.slice(0, cut).trim(), model: bare.slice(cut + 1).trim() }
 }
 
 /**

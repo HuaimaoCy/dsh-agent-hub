@@ -25,7 +25,8 @@ import { buildAgentPersona, buildAgentPrompt } from '../src/prompt.js'
 import { finishError, normalizeAgents, parsePlanJson } from '../src/llm.js'
 import { formatBoard } from '../src/tools.js'
 import { MARKER_HEADER, openStream, ROUTE_PATH } from '../src/http.js'
-import { hubPolicyText } from '../src/policy.js'
+import { hubPolicyText, routesLine } from '../src/policy.js'
+import { annotateRoute, routeMetaOf } from '../src/catalog.js'
 
 process.on('unhandledRejection', (reason) => {
   console.error('FAIL unhandled rejection in the suite:', reason)
@@ -1241,6 +1242,47 @@ await check('hub_read 里也报出主智能体', async () => {
   const tool = harness.tools.registered.get('hub_read')
   const text = await tool.execute({}, { agent: { session: { id: sessionId } } })
   assert.match(text, /主智能体/)
+})
+
+console.log('\n成本与能力感知的选路')
+await check('协调者把整行批注原样抄回来时仍能解析出路由', () => {
+  // The coordinator is offered `route｜成本：…｜额度：…`. Copying the whole line is
+  // the obvious model behaviour, and if the annotation is not stripped the route is
+  // dropped by validation — every row then falls back to one model, silently.
+  const rows = normalizeAgents(
+    { agents: [{ name: '甲', task: 't', model: 'zai-coding-cn/glm-4.7｜成本：中价，约 $0.9/$0.9｜额度：额度一般｜擅长：编码' }] },
+    {
+      count: 1,
+      route: { provider: 'deepseek-official', model: 'deepseek-flash' },
+      defaults: { write: true, shell: false },
+      routes: new Set(['zai-coding-cn/glm-4.7']),
+    },
+  )
+  assert.equal(rows[0].model.provider, 'zai-coding-cn')
+  assert.equal(rows[0].model.model, 'glm-4.7')
+})
+await check('未知路由降级为裸路由名，不阻断开台', () => {
+  assert.equal(annotateRoute('nope/nothing'), 'nope/nothing')
+  assert.equal(routeMetaOf('nope/nothing'), undefined)
+  assert.equal(routeMetaOf('nope/nothing', { 'nope/nothing': { tier: 'high' } }).tier, 'high')
+})
+await check('routeMeta 覆盖对协调者与主智能体同时生效（否则同一路由两套档位）', () => {
+  // The coordinator's annotated list and the policy line describe the same routes.
+  // Computing the tier from the built-ins in one place and from the overrides in the
+  // other is how the two ends disagree about what a route costs.
+  const overrides = { 'zai-coding-cn/glm-4.7': { tier: 'cheap' } }
+  assert.match(annotateRoute('zai-coding-cn/glm-4.7', overrides), /低价/)
+  assert.match(routesLine(['zai-coding-cn/glm-4.7'], overrides), /低价/)
+  // Without the override the built-in tier stands.
+  assert.match(routesLine(['zai-coding-cn/glm-4.7']), /中价/)
+})
+await check('逐条批注带成本、额度、擅长与边界', () => {
+  const line = annotateRoute('codex-chatgpt/gpt-6-astra')
+  assert.match(line, /成本：高价/)
+  assert.match(line, /订阅制/)
+  assert.match(line, /额度：额度紧张/)
+  assert.match(line, /擅长：/)
+  assert.match(line, /边界：/)
 })
 
 console.log('\n本对话直接派发的智能体也上台')
