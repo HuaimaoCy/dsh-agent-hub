@@ -152,6 +152,8 @@ export class Hub {
   #routes = []
   /** In-flight route refresh, so prompt assembly cannot start one per request. */
   #warming = null
+  /** Naming counter for adopted agents, kept apart from the `aN` launch ids. */
+  #workerSeq = 0
 
   /**
    * @param {{ ctx: Record<string, any>, settings: Record<string, any> }} options - Plugin context and normalized config.
@@ -532,10 +534,15 @@ export class Hub {
     // around would make "phase" lie about what is actually running. The child
     // index is purged with them, or a replaced agent's later events would
     // resolve to whichever new card happens to reuse its local id.
-    this.#replaceAgents(board, specs.map((spec, index) => createCard(spec, index, this.settings)))
-    const roster = board.agents.map(card => ({ name: card.name, role: card.role, files: card.files }))
+    //
+    // `launched` — not `board.agents` — is what gets spawned and published. Adopted
+    // cards live in `board.agents` too, and spawning from that array would dispatch
+    // a second copy of every agent this conversation already had running.
+    const launched = specs.map((spec, index) => createCard(spec, index, this.settings))
+    this.#replaceAgents(board, launched)
+    const roster = launched.map(card => ({ name: card.name, role: card.role, files: card.files }))
 
-    const results = await Promise.allSettled(board.agents.map(async (card) => {
+    const results = await Promise.allSettled(launched.map(async (card) => {
       const start = await subagents.startContinuable({
         provider,
         label: `${card.name}${card.role === '' ? '' : ` · ${card.role}`}`.slice(0, 120),
@@ -552,7 +559,7 @@ export class Hub {
     }))
 
     for (const [index, result] of results.entries()) {
-      const card = board.agents[index]
+      const card = launched[index]
       if (result.status === 'fulfilled') {
         card.id = result.value.start.childId
         card.status = 'running'
@@ -586,7 +593,7 @@ export class Hub {
     // published as real team tasks, so the native Team UI and the `team_task_*`
     // tools see the same plan. Best-effort — the agents are already running, so a
     // board that refuses one row must not cancel the launch.
-    const plan = await publishPlan(this.ctx, parent, board.agents)
+    const plan = await publishPlan(this.ctx, parent, launched)
     if (plan.published > 0) {
       this.append(board.sessionId, {
         kind: 'plan',
@@ -596,6 +603,9 @@ export class Hub {
       })
     }
     if (plan.error !== null) this.#noteTeamWarning(board, `原生任务板写入失败：${plan.error}`)
+    // Fire-and-forget: a catalogue read must not delay a launch whose agents are
+    // already running, and the adopted cards arrive as their own frames.
+    void this.#syncExistingChildren(board)
     return { agents: board.agents.map(card => ({ ...card })) }
   }
 
@@ -1032,11 +1042,24 @@ export class Hub {
    * @returns {void}
    */
   noteSubagentStart(info) {
-    const located = this.#locate(info?.id)
+    const childId = info?.id
+    if (typeof childId !== 'string' || childId === '') return
+    const located = this.#locate(childId) ?? this.#adopt(childId)
     if (located === null || located.card === null) return
     located.card.status = 'running'
     located.card.startedAt ??= Date.now()
     this.#emitAgent(located.board.sessionId, located.card)
+    const adoption = located.card.origin === 'adopted' ? located : null
+    if (adoption !== null) {
+      this.append(adoption.board.sessionId, {
+        kind: 'system',
+        from: 'system',
+        fromName: '系统',
+        agentId: adoption.card.id,
+        text: `${adoption.card.name} 已加入协作台（本对话直接派发，不是协作台派发的）`,
+      })
+      this.#emitBoard(adoption.board)
+    }
   }
 
   /**
@@ -1246,10 +1269,94 @@ export class Hub {
    * @returns {void}
    */
   #replaceAgents(board, cards) {
+    // Adopted cards — agents this conversation started outside the hub — are not
+    // part of the roster being replaced. Dropping them would erase the lane of an
+    // agent that is still working, and take its event link with it.
+    const adopted = board.agents.filter(card => card.origin === 'adopted')
     for (const previous of board.agents) {
-      if (previous.id !== null) this.#children.delete(previous.id)
+      if (previous.id !== null && previous.origin !== 'adopted') this.#children.delete(previous.id)
     }
-    board.agents = cards
+    board.agents = [...cards, ...adopted]
+  }
+
+  /**
+   * Take an agent this conversation started outside the hub onto the board.
+   *
+   * The hub only ever registered the children it launched itself, so a native
+   * `subagent` call or an Agent Teams teammate — the two ordinary ways a
+   * conversation starts help — ran entirely off the board: no lane, no progress,
+   * no terminal status. `subagent/start` carries the child's session id but not
+   * its parent, so the parent comes from the child's own session header.
+   * @param {string} childId - Child session id from `subagent/start`.
+   * @returns {{ board: Record<string, any>, card: Record<string, any> }|null} The adopted card, or null.
+   */
+  #adopt(childId) {
+    const agents = this.ctx.get?.('agents')
+    const agent = agents?.get?.(childId)
+    const parentId = agent?.session?.header?.parentSession
+    if (typeof parentId !== 'string' || parentId === '') return null
+    // The board is created on demand here, and that is the point: a conversation
+    // that starts an agent gets a board to show it on. Only a live conversation
+    // qualifies, so a stale parent id can never mint a phantom board.
+    const parent = agents?.get?.(parentId)
+    if (parent === undefined || parent === null) return null
+    const board = this.board(parentId)
+    // Only a **direct** child of the conversation is adopted, so the parent has to
+    // be the board's own session — not merely resolve to it. Without this, a
+    // grandchild (a helper one of our agents started) would be adopted as a peer,
+    // and the board would turn into a call tree.
+    if (board.sessionId !== parentId) return null
+    const known = board.agents.find(card => card.id === childId)
+    if (known !== undefined) return { board, card: known }
+    this.#workerSeq += 1
+    const label = agent?.options?.label
+    const card = createCard({
+      clientId: `w${this.#workerSeq}`,
+      name: typeof label === 'string' && label.trim() !== '' ? label.trim() : `子智能体 ${this.#workerSeq}`,
+      role: '',
+      task: '',
+      model: agent?.options ?? {},
+      // The hub did not grant these, so it must not claim them: a native teammate's
+      // capabilities are its own and unknown here. `origin` tells the panel not to
+      // render capability chips for this row.
+      powers: { write: false, shell: false, message: true },
+      files: [],
+    }, board.agents.length, this.settings)
+    card.id = childId
+    card.origin = 'adopted'
+    card.status = 'running'
+    card.startedAt = Date.now()
+    card.activity = '已启动（本对话直接派发）'
+    board.agents.push(card)
+    this.#children.set(childId, { sessionId: board.sessionId, clientId: card.clientId })
+    return { board, card }
+  }
+
+  /**
+   * Adopt the children of this conversation that were already running when the
+   * board appeared.
+   *
+   * Adoption happens on `subagent/start`, which a child started before the board
+   * existed — or before this plugin was loaded — has already passed. Without this
+   * sweep those agents stay off the board for their whole life, which is the exact
+   * complaint the feature exists to answer.
+   * @param {Record<string, any>} board - The board.
+   * @returns {Promise<void>} Resolves once the sweep is done or has failed.
+   */
+  async #syncExistingChildren(board) {
+    try {
+      const children = await this.ctx.get?.('subagents')?.listChildren?.(board.sessionId)
+      for (const entry of Array.isArray(children) ? children : []) {
+        const id = typeof entry?.id === 'string' ? entry.id
+          : (typeof entry?.sessionId === 'string' ? entry.sessionId : '')
+        if (id === '') continue
+        const adopted = this.#adopt(id)
+        if (adopted !== null) this.#emitAgent(board.sessionId, adopted.card)
+      }
+    } catch {
+      // A catalogue read that fails leaves the board as it was; the next spawn still
+      // adopts normally.
+    }
   }
 
   #emit(sessionId, event, data) {

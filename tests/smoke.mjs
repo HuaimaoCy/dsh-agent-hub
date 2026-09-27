@@ -105,9 +105,18 @@ const services = {
         // `child-x-*` is a subagent of a subagent: its parent is itself a subagent,
         // which is how the suite tells a deeper descendant (a participant of the
         // same board) apart from a direct child whose card was replaced.
-        const parent = id.startsWith('child-x-') ? 'child-1' : 'session-parent'
-        return { id, session: { id, header: { parentSession: parent } } }
+        const parent = id.startsWith('child-x-') ? 'child-1'
+          : (id === 'child-lonely' ? 'session-lonely' : 'session-parent')
+        // A natively spawned child carries a label and a route, exactly as a real
+        // one does — the board shows both.
+        const options = id === 'child-native'
+          ? { provider: 'zai-coding-cn', model: 'glm-4.7', label: '评审员' }
+          : undefined
+        return { id, ...(options === undefined ? {} : { options }), session: { id, header: { parentSession: parent } } }
       }
+      // A live conversation nobody has opened the hub in yet: it has no board, and
+      // spawning an agent in it is what must bring one into being.
+      if (id === 'session-lonely') return { id, session: { id, header: {} } }
       // Every other id is an unrelated root session, so it owns its own board.
       return undefined
     },
@@ -1202,6 +1211,53 @@ await check('hub_read 里也报出主智能体', async () => {
   const tool = harness.tools.registered.get('hub_read')
   const text = await tool.execute({}, { agent: { session: { id: sessionId } } })
   assert.match(text, /主智能体/)
+})
+
+console.log('\n本对话直接派发的智能体也上台')
+await check('原生派发的子智能体被认领：有泳道、有名称与模型', async () => {
+  harness.handlers.get('subagent/start')({ id: 'child-native', runId: 'r-native', provider: 'inproc', local: true })
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const card = response.payload.result.agents.find(agent => agent.id === 'child-native')
+  assert.ok(card !== undefined, 'a natively spawned subagent must appear on the board')
+  assert.equal(card.origin, 'adopted')
+  assert.equal(card.name, '评审员')
+  assert.equal(card.model.model, 'glm-4.7')
+  assert.equal(card.status, 'running')
+})
+await check('认领的智能体进度会同步（这才是"同步"的实际含义）', async () => {
+  sessionEvent({ id: 'child-native' }, {
+    type: 'tool/call', seq: 70, data: { turn: 1, step: 1, callId: 'c70', name: 'read', arguments: '{"path":"src/hub.js"}' },
+  })
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const card = response.payload.result.agents.find(agent => agent.id === 'child-native')
+  assert.match(card.activity, /src\/hub\.js/)
+})
+await check('再次开台不会把认领的智能体当派发行（否则会派发第二份）', async () => {
+  const before = state.startCalls.length
+  const tool = harness.tools.registered.get('hub_launch')
+  await tool.execute({
+    objective: '再开一次',
+    agents: [{ name: '甲', task: 't1', provider: 'deepseek-official', model: 'deepseek-flash' }],
+  }, { agent: parentAgent, signal: new AbortController().signal })
+  assert.equal(state.startCalls.length - before, 1, 'exactly one new child, not one per board row')
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  assert.ok(response.payload.result.agents.some(agent => agent.id === 'child-native'), 'the adopted lane must survive a re-launch')
+})
+await check('更深的后代不会被认领成卡片（但仍是同一块台的参与者）', async () => {
+  harness.handlers.get('subagent/start')({ id: 'child-x-native', runId: 'r-native-2', provider: 'inproc', local: true })
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  assert.equal(response.payload.result.agents.some(agent => agent.id === 'child-x-native'), false)
+})
+await check('没有台时，派发会按需建台（否则先派子智能体的对话永远看不到它）', async () => {
+  // A conversation that spawns help before anyone opens the hub still gets a board,
+  // because that is the only way its agent can appear anywhere. Nothing created a
+  // board for `session-lonely` before this spawn.
+  harness.handlers.get('subagent/start')({ id: 'child-lonely', runId: 'r-lonely', provider: 'inproc', local: true })
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=session-lonely`)
+  assert.equal(response.payload.result.sessionId, 'session-lonely')
+  assert.equal(response.payload.result.agents.length, 1)
+  assert.equal(response.payload.result.agents[0].id, 'child-lonely')
+  assert.ok(response.payload.result.feed.some(item => item.text.includes('已加入协作台')))
 })
 
 console.log('\n实时流')

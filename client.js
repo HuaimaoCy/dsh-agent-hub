@@ -386,12 +386,24 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * The cards the plan editor may turn into a launch payload.
+     *
+     * Adopted agents — ones this conversation started outside the hub — are on the
+     * board and get a lane, but they are not ours to re-launch, so they must never
+     * become editable rows. Launching from them would dispatch a second copy of an
+     * agent that is already running.
+     */
+    function planCards(state) {
+      const agents = Array.isArray(state?.agents) ? state.agents : []
+      return agents.filter(card => card?.origin !== 'adopted')
+    }
+
     /** Build the `launch` payload from a board's current roster. */
     function draftFromState(state) {
-      const agents = Array.isArray(state?.agents) ? state.agents : []
       return launchPayload(
         typeof state?.objective === 'string' ? state.objective : '',
-        agents.map((card, index) => draftRowFromCard(card, index)),
+        planCards(state).map((card, index) => draftRowFromCard(card, index)),
       )
     }
 
@@ -1504,7 +1516,7 @@ window.__ModuleLoader__.load({
       // A running board opens in the 运行态; `editing` is the way back to the
       // plan, and a plan that is still all-draft is always the 编排态.
       const planning = live !== true || editing === true
-      const derived = state.agents.map((card, index) => draftRowFromCard(card, index))
+      const derived = planCards(state).map((card, index) => draftRowFromCard(card, index))
       const plan = rows ?? derived
       const validation = validateDraft(plan)
       const mutators = planMutators(setRows, derived)
@@ -1744,78 +1756,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The composer strip: an honest, glanceable status line for this conversation.
-     *
-     * **Why a segmented indicator and not a percentage bar.** A progress bar is a
-     * *determinate* control: it promises "this fraction of a known total is
-     * done". How much work is left in a multi-agent run is genuinely unknowable,
-     * so any fraction derived from elapsed time or step counts would sit at 80%
-     * for ten minutes — not an imprecise number but a fabricated one, and the
-     * user will notice. The one quantity that *is* known is how many agents have
-     * settled out of how many were launched, so that is what this shows: one
-     * segment per agent, filling only when that agent reaches a terminal state.
-     * It also answers "who is still going", which a single bar cannot.
-     *
-     * There is deliberately no numeric percentage for the same reason the
-     * segments exist: the segments *are* the count, and a number beside them
-     * would restate it in a form that implies precision nothing here has.
-     *
-     * **Why it stays quiet.** This slot sits immediately above the composer, in
-     * the middle of the user's workspace, and it renders on a blank new
-     * conversation too. So: no track at all when there is nothing to track, only
-     * opacity and background-colour transitions (both compositor-friendly), no
-     * bounce (nothing here was thrown by the user, so overshoot would misdescribe
-     * the physics), and no sweeping shimmer — a looping sweep is motion the user
-     * cannot act on and cannot stop. Once everything has settled the strip goes
-     * calm instead of leaving a full bar asking for attention.
-     */
-    function CompactBar(props) {
-      const t = props.t
-      const sessionId = props.sessionId === undefined ? undefined : String(props.sessionId)
-      const board = useBoard(sessionId)
-      const agents = board.state.agents
-      const running = agents.filter(card => card.status === 'running').length
-      const settled = agents.filter(card => TERMINAL_STATUSES.includes(card.status)).length
-      const failed = agents.filter(card => card.status === 'error' || card.status === 'stopped').length
-      const phase = phaseOf(board.state)
-      const summary = agents.length === 0
-        ? t('dockIdle')
-        : running > 0 ? t('dockCount', { n: agents.length, m: running })
-          : phase === 'done' ? t('dockDone', { n: agents.length })
-            : t('dockCount', { n: agents.length, m: 0 })
-      return h('div', { className: 'dsah-dock' },
-        h(StyleSheet),
-        h(IconUsersOutlineMedium, { size: 14 }),
-        h('span', { className: 'dsah-cap' }, summary),
-        // An empty track is pure noise, and this slot also renders where a board
-        // cannot exist yet. `progressbar` with real min/max/now is the truthful
-        // ARIA shape here because the counts are actually known.
-        agents.length === 0 ? null : h('span', {
-          className: 'dsah-track',
-          role: 'progressbar',
-          'aria-valuemin': 0,
-          'aria-valuemax': agents.length,
-          'aria-valuenow': settled,
-          'aria-label': summary,
-        }, ...agents.map((card, index) => h('span', {
-          key: identityOf(card) ?? `seg${index}`,
-          className: `dsah-seg ${segmentState(card)}`,
-        }))),
-        agents.length === 0 ? null : h(Tag, {
-          tone: failed > 0 && running === 0 ? 'warning' : running > 0 ? 'success' : phase === 'done' ? 'neutral' : 'outline',
-        }, statusLabel(running > 0 ? 'running' : phase === 'done' ? 'done' : 'idle', t)),
-        h('span', { className: 'dsah-spacer' }),
-        h(Button, {
-          size: 'sm', icon: h(IconQueueOutlineMedium, null),
-          // Selecting the panel is the navigation a sidebar press performs; the
-          // Host injects the verb because the layout service is not a baseline
-          // specifier this factory may require.
-          onClick: () => { props.openHub?.() },
-        }, t('hubOpen')),
-      )
-    }
-
-    /**
      * One segment's state class.
      *
      * `idle` and `queued` share `is-pending`: an agent that has been published but
@@ -1905,21 +1845,11 @@ window.__ModuleLoader__.load({
           inject: () => ({ t }),
         }, AgentHubView))
 
-        // The composer dock renders in a blank new-conversation screen too, where
-        // no conversation view exists at all.
-        ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-          name: 'conversation.input.dock',
-          id: PANEL_ID,
-          order: 30,
-          inject: () => ({
-            t,
-            openHub: () => {
-              if (layout === undefined || layout === null || typeof layout.selectPanel !== 'function') return
-              layout.selectPanel(PANEL_ID)
-            },
-          }),
-        }, CompactBar))
-
+        // Deliberately no `conversation.input.dock` registration. The hub used to
+        // advertise itself above the composer with a "run this in parallel" strip
+        // and an "open the hub" button; both were removed because the strip made a
+        // claim about every message the user typed, and the panel is already one
+        // click away in the sidebar. The hub is a tool, not a prompt.
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
           id: PANEL_ID,

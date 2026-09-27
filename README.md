@@ -238,14 +238,39 @@ A terminal status comes from `subagent/end` alone. Session events report process
 and never set a terminal state — otherwise one `turn/end` would show a waiting
 agent as finished.
 
-## The composer indicator
+## Agents the conversation starts itself
 
-The strip above the composer shows one **segment per launched agent**, filled only
-when that agent settles. It is intentionally *not* a percentage bar: how much work
-is left in an open-ended run is unknowable, so any fill fraction would be
-fabricated. Segments carry the honest counts (settled out of launched) and answer
-"who is still going". There is no track when no agent exists, no sweeping
-animation, no bounce, and `prefers-reduced-motion` freezes the pulse.
+A hub board is not limited to what the hub launched. When *any* agent starts a
+child in this conversation — the native `subagent` tool, an Agent Teams teammate,
+or anything else — that child is **adopted**: it gets a lane with its own name,
+route, status, activity and output, and its progress streams onto the board like any
+other row.
+
+`subagent/start` carries the child's session id but **not** its parent, so the parent
+is read from the child's own session header. Adoption also **creates the board when
+none exists yet**: a conversation that starts help before anyone opens the hub would
+otherwise have nowhere to show it.
+
+Two boundaries, both deliberate:
+
+- **Direct children only.** A grandchild — a helper one of our agents started — is a
+  *participant* of the same board (it can `hub_read` and `hub_post`) but does not get
+  a row. The parent must be the board's own session, not merely resolve to it;
+  otherwise the board would turn into a call tree.
+- **Adopted rows are never launched from.** They appear in the plan editor's source
+  data but are filtered out of it, because launching from an adopted row would
+  dispatch a second copy of an agent that is already running. The Host keeps them out
+  of the spawn path for the same reason, and a test pins both halves.
+
+## Where the panel lives
+
+Three slots: the main panel, a `conversation.view` tab, and a sidebar entry.
+
+There is deliberately **no composer dock**. The hub used to render a strip above the
+input box with a "run it in parallel with the Agent Hub" hint and an "open the hub"
+button; both are gone. The strip made a claim about every message the user typed —
+whether or not this message was parallel work — and the panel was already one click
+away. A tool does not need to advertise itself in the middle of the place you type.
 
 ## Configuration
 

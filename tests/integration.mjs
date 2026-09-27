@@ -409,7 +409,10 @@ await check('apply 注册四个槽位且不抛错（含拿不到 sessions 服务
   }
   client.apply(ctx)
   const names = registrations.map(entry => entry.options.name).sort()
-  assert.deepEqual(names, ['conversation.input.dock', 'conversation.view', 'main', 'sidebar.panellist'])
+  // Three slots, and deliberately no `conversation.input.dock`: the composer strip
+  // and its "open the hub" button were removed, so the panel is reached from the
+  // sidebar or the conversation view tab and nothing is advertised above the input.
+  assert.deepEqual(names, ['conversation.view', 'main', 'sidebar.panellist'])
   const main = registrations.find(entry => entry.options.name === 'main')
   assert.equal(main.options.key, 'agent-hub')
   const sidebar = registrations.find(entry => entry.options.name === 'sidebar.panellist')
@@ -436,7 +439,9 @@ await check('拿不到任何宿主服务时也能装载（ctx.get 对未声明�
     effect: (run) => { run() },
   }
   client.apply(ctx)
-  assert.equal(registrations.length, 4)
+  // Three: the main panel, the conversation view tab, and the sidebar entry. The
+  // composer dock registration is gone, so nothing is injected above the input.
+  assert.equal(registrations.length, 3)
   const main = registrations.find(options => options.name === 'main')
   const injected = main.inject()
   assert.equal(typeof injected.t, 'function', 'the panel must always get a translate function')
