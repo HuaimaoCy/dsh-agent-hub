@@ -64,6 +64,8 @@ const state = {
   llmFail: false,
   startFail: false,
   startCalls: [],
+  /** Live status per child id, as the runtime would report it (`child-*` defaults to running). */
+  agentStatus: new Map(),
   promptCalls: [],
   interruptCalls: [],
   policySections: [],
@@ -113,7 +115,16 @@ const services = {
         const options = id === 'child-native'
           ? { provider: 'zai-coding-cn', model: 'glm-4.7', label: '评审员' }
           : undefined
-        return { id, ...(options === undefined ? {} : { options }), session: { id, header: { parentSession: parent } } }
+        // The live agent's own status is what each card is reconciled against, so the
+        // harness models it as mutable state: a test that drives an `agent/status`
+        // change updates the map, exactly as the runtime would.
+        const status = state.agentStatus.get(id) ?? 'running'
+        return {
+          id,
+          status,
+          ...(options === undefined ? {} : { options }),
+          session: { id, header: { parentSession: parent } },
+        }
       }
       // A live conversation nobody has opened the hub in yet: it has no board, and
       // spawning an agent in it is what must bring one into being.
@@ -730,6 +741,8 @@ await check('未列入协作台的会话事件被忽略', async () => {
 await check('agent/status 让空闲的子智能体变成待命而不是完成', async () => {
   harness.handlers.get('agent/status')({ agent: { id: secondId }, status: 'running' })
   harness.handlers.get('agent/status')({ agent: { id: secondId }, status: 'idle' })
+  // The live agent follows the event it emitted; the snapshot reconciles against it.
+  state.agentStatus.set(secondId, 'idle')
   const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
   assert.equal(response.payload.result.agents[1].status, 'idle')
   assert.equal(response.payload.result.agents[1].endedAt, null, 'idle must not look terminal')
@@ -1283,6 +1296,33 @@ await check('逐条批注带成本、额度、擅长与边界', () => {
   assert.match(line, /额度：额度紧张/)
   assert.match(line, /擅长：/)
   assert.match(line, /边界：/)
+})
+
+await check('发布但从未被提示的子会话不再假装在跑', async () => {
+  // `subagent/start` fires when a child is *published*, which happens before its
+  // first prompt — and the caller may still abort in between (upstream tests do
+  // exactly that). The card read the event as proof of work, so an agent that had
+  // never taken a turn sat on the board as a running lane with nothing behind it.
+  // The child exists but was never prompted, so the runtime reports it idle.
+  state.agentStatus.set('child-never-prompted', 'idle')
+  harness.handlers.get('subagent/start')({ id: 'child-never-prompted', runId: 'r-np', provider: 'inproc', local: true })
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const card = response.payload.result.agents.find(agent => agent.id === 'child-never-prompted')
+  assert.ok(card !== undefined, 'the published child is on the board')
+  assert.equal(card.status, 'idle', 'a child that never took a turn must not claim to be working')
+})
+await check('真的在跑的卡片仍然是 running（对齐不是一律降级）', async () => {
+  // A published child normally goes straight into its first turn, which the harness
+  // reports as running — the reconcile must leave it alone.
+  harness.handlers.get('subagent/start')({ id: 'child-live-demo', runId: 'r-live', provider: 'inproc', local: true })
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const card = response.payload.result.agents.find(agent => agent.id === 'child-live-demo')
+  assert.equal(card.status, 'running', 'the live agent reports running, so the card must too')
+})
+await check('hub_read 的名册与界面看到同一个状态', async () => {
+  const tool = harness.tools.registered.get('hub_read')
+  const text = await tool.execute({}, { agent: { session: { id: sessionId } } })
+  assert.match(text, /child-busy|子智能体|评审员/)
 })
 
 console.log('\n本对话直接派发的智能体也上台')

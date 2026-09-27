@@ -328,13 +328,17 @@ export class Hub {
     // report an empty team beside a full board.
     const team = readTeam(this.ctx, this.ctx.get?.('agents')?.get?.(board.sessionId))
     if (board.teamWarning !== undefined && board.teamWarning !== null) team.warning = board.teamWarning
+    const cards = this.#liveCards(board)
     return {
       // The resolved owner, so a caller that passed a subagent id learns which
       // conversation's board it actually got instead of seeing an echo.
       sessionId: board.sessionId,
       objective: board.objective,
-      phase: phaseOf(board),
-      agents: board.agents.map(card => ({ ...card })),
+      // From the reconciled cards, not the raw ones: counting work off one view and
+      // showing it off another is how a board ends up claiming "running" with every
+      // lane idle.
+      phase: phaseOf({ agents: cards }),
+      agents: cards,
       // The conversation's own agent, kept out of `agents` (see `board()`).
       lead: this.#leadView(board),
       feed: board.feed.map(item => ({ ...item })),
@@ -917,7 +921,9 @@ export class Hub {
       // The conversation's own agent, so a dispatched agent knows who is working
       // beside it rather than assuming the board is the whole team.
       lead: this.#leadView(board),
-      roster: board.agents.map(agent => ({
+      // Reconciled like the panel's view, so an agent reading the roster and a human
+      // looking at the lanes are told the same thing about who is working.
+      roster: this.#liveCards(board).map(agent => ({
         name: agent.name,
         role: agent.role,
         status: agent.status,
@@ -1449,6 +1455,35 @@ export class Hub {
     if (located.card !== null) return { board: located.board, card: located.card }
     if (sessionId !== located.board.sessionId) return null
     return { board: located.board, card: located.board.lead }
+  }
+
+  /**
+   * The board's cards with each status reconciled against its live agent.
+   *
+   * `subagent/start` fires when a child is **published**, and publication happens
+   * before the child's first prompt — the caller can still abort in between, which
+   * upstream tests do deliberately. A card that read that event as proof of work
+   * claimed to be running with nothing behind it, and the board showed an empty lane
+   * spinning forever: an agent that had never taken a single turn.
+   *
+   * A terminal status is never overwritten. It is evidence we observed, and a child
+   * session routinely outlives the run that produced it.
+   * @param {Record<string, any>} board - The board.
+   * @returns {Record<string, any>[]} Cards for the wire.
+   */
+  #liveCards(board) {
+    const agents = this.ctx.get?.('agents')
+    return board.agents.map(card => {
+      if (card.id === null || TERMINAL_STATUSES.has(card.status)) return { ...card }
+      const agent = agents?.get?.(card.id)
+      if (agent === undefined || agent === null) return { ...card }
+      // Only reconcile against a status the runtime actually reports. Anything else
+      // means this view has nothing better than what the events folded, and guessing
+      // "idle" here would overwrite a status the harness just told us about.
+      const live = agent.status
+      if (live !== 'running' && live !== 'idle') return { ...card }
+      return { ...card, status: live }
+    })
   }
 
   /**
