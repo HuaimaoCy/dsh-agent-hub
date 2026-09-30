@@ -1298,6 +1298,18 @@ await check('逐条批注带成本、额度、擅长与边界', () => {
   assert.match(line, /边界：/)
 })
 
+await check('新模型有独立元数据，不是回落到供应商档', () => {
+  // Recognition has two levels and they must stay distinguishable: a model we know
+  // gets its own line, and one we have never seen falls back to the provider's
+  // conservative entry instead of vanishing.
+  assert.match(annotateRoute('codex-chatgpt/gpt-6.1-sol'), /中价/)
+  assert.match(annotateRoute('codex-chatgpt/gpt-6.1-sol'), /最新主力/)
+  // The app-server now calls gpt-6-sol the *previous* generation, and the line says so.
+  assert.match(annotateRoute('codex-chatgpt/gpt-6-sol'), /上一代主力/)
+  assert.match(annotateRoute('codex-chatgpt/gpt-9-future'), /高价/)
+  assert.match(annotateRoute('codex-chatgpt/gpt-9-future'), /保守处理/)
+})
+
 await check('发布但从未被提示的子会话不再假装在跑', async () => {
   // `subagent/start` fires when a child is *published*, which happens before its
   // first prompt — and the caller may still abort in between (upstream tests do

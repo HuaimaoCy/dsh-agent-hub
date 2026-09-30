@@ -63,14 +63,38 @@ const BUILTIN_META = {
 
   // codex-chatgpt — subscription (ChatGPT sign-in), no per-token price; the
   // scarce resource is the account, not the meter.
-  'codex-chatgpt/gpt-6-astra': { metered: false, tier: 'high', quota: 'thin', strengths: '最强判断力：架构裁决、疑难排错、最终评审', boundaries: '订阅额度最紧张，只给判断密集角色，禁做批量机械活' },
-  'codex-chatgpt/gpt-6-sol': { metered: false, tier: 'high', quota: 'thin', strengths: '复杂推理与规划', boundaries: '订阅额度紧张，慎用于批量任务' },
-  'codex-chatgpt/gpt-6-luna': { metered: false, tier: 'mid', quota: 'thin', strengths: '均衡推理与写作', boundaries: '订阅额度紧张' },
-  'codex-chatgpt/gpt-5.6-sol': { metered: false, tier: 'mid', quota: 'thin', strengths: '可靠推理', boundaries: '订阅额度紧张' },
-  'codex-chatgpt/gpt-5.6-terra': { metered: false, tier: 'mid', quota: 'thin', strengths: '扎实执行与编码', boundaries: '订阅额度紧张' },
-  'codex-chatgpt/gpt-5.6-luna': { metered: false, tier: 'cheap', quota: 'thin', strengths: '轻量快速', boundaries: '订阅额度紧张，不要铺满整个团队' },
-  'codex-chatgpt/gpt-5.5': { metered: false, tier: 'mid', quota: 'thin', strengths: '通用', boundaries: '订阅额度紧张' },
-  'codex-chatgpt': { metered: false, tier: 'high', quota: 'thin', strengths: '强判断', boundaries: '订阅额度紧张' },
+  //
+  // Tiers and strengths follow the app-server's own model descriptions, read from
+  // `codex debug models` on the installed build, instead of impressions of them:
+  // `gpt-6.1-sol` calls itself the latest workhorse, `gpt-6-sol` the *previous*
+  // generation one, `gpt-6-astra` frontier intelligence, `gpt-6-luna` fast and
+  // affordable. Tiers rank premium-ness inside the subscription, which is what the
+  // coordinator needs to keep bulk work off the scarce routes.
+  'codex-chatgpt/gpt-6.1-sol': {
+    metered: false, tier: 'mid', quota: 'thin',
+    strengths: '最新主力：编码与日常工作（app-server：Latest workhorse model for coding and everyday work）',
+    boundaries: '订阅额度紧张，批量机械活交给低价档路由',
+  },
+  'codex-chatgpt/gpt-6-astra': {
+    metered: false, tier: 'high', quota: 'thin',
+    strengths: '最强判断力：架构裁决、疑难排错、最终评审（Frontier intelligence for the most demanding work）',
+    boundaries: '订阅额度最紧张，只给判断密集角色，禁做批量机械活',
+  },
+  'codex-chatgpt/gpt-6-sol': {
+    metered: false, tier: 'mid', quota: 'thin',
+    strengths: '上一代主力（Previous generation workhorse model），复杂推理与规划',
+    boundaries: '已被 gpt-6.1-sol 取代，没有理由优先选它；订阅额度紧张',
+  },
+  'codex-chatgpt/gpt-6-luna': {
+    metered: false, tier: 'cheap', quota: 'thin',
+    strengths: '轻量便宜：较容易的任务（Fast and affordable model for easier tasks）',
+    boundaries: '订阅额度紧张，不要铺满整个团队',
+  },
+  'codex-chatgpt/gpt-5.6-sol': { metered: false, tier: 'mid', quota: 'thin', strengths: '更早一代的主力（Older generation workhorse model）', boundaries: '订阅额度紧张' },
+  'codex-chatgpt/gpt-5.6-terra': { metered: false, tier: 'mid', quota: 'thin', strengths: '较早的均衡模型（Older balanced model for straightforward work）', boundaries: '订阅额度紧张' },
+  'codex-chatgpt/gpt-5.6-luna': { metered: false, tier: 'cheap', quota: 'thin', strengths: '较早的轻量模型（Older fast and efficient model）', boundaries: '订阅额度紧张，不要铺满整个团队' },
+  'codex-chatgpt/gpt-5.5': { metered: false, tier: 'cheap', quota: 'thin', strengths: '更早一代', boundaries: 'app-server 已把它标为 hidden，不会再出现在路由清单里' },
+  'codex-chatgpt': { metered: false, tier: 'high', quota: 'thin', strengths: '强判断', boundaries: '订阅额度紧张；清单里没见过的 codex 路由按最高档保守处理' },
 }
 
 /** Compact Chinese tag per cost tier, for one-glance prompt lines. */
