@@ -138,6 +138,9 @@ window.__ModuleLoader__.load({
         kindPlan: '方案', kindProgress: '进度', kindMessage: '消息',
         kindHandoff: '交接', kindHuman: '人工', kindSystem: '系统',
         unread: '未读', hubOpen: '打开协作台', dockIdle: '用协作台并行处理',
+        laneActiveCount: '进行中 {n}', laneFinishedCount: '已完成 {n}',
+        laneNoneActive: '没有进行中的智能体', laneNoneFinished: '还没有已完成的智能体',
+        laneFinishedHint: '已完成的仍可被唤醒或插话',
         dockCount: '{n} 个智能体中 {m} 个运行中', dockDone: '{n} 个智能体已结束',
         sent: '已发送。', accepted: '已受理。', stoppedNotice: '已请求停止 {n} 个智能体。',
         recent: '最近的会话', timeNow: '刚刚', timeMinutes: '{n}分钟',
@@ -185,6 +188,9 @@ window.__ModuleLoader__.load({
         kindPlan: 'Plan', kindProgress: 'Progress', kindMessage: 'Message',
         kindHandoff: 'Handoff', kindHuman: 'Human', kindSystem: 'System',
         unread: 'unread', hubOpen: 'Open the hub', dockIdle: 'Run it in parallel with the Agent Hub',
+        laneActiveCount: '{n} active', laneFinishedCount: '{n} finished',
+        laneNoneActive: 'No agents in progress', laneNoneFinished: 'No finished agents yet',
+        laneFinishedHint: 'finished agents can still be woken or steered',
         dockCount: '{m} of {n} agents running', dockDone: '{n} agents finished',
         sent: 'Sent.', accepted: 'Accepted.', stoppedNotice: 'Asked {n} agents to stop.',
         recent: 'Recent conversations', timeNow: 'just now', timeMinutes: '{n}min',
@@ -384,6 +390,27 @@ window.__ModuleLoader__.load({
           files: Array.isArray(row.files) ? [...row.files] : [],
         })),
       }
+    }
+
+    /**
+     * Split the board's cards into the two surfaces the panel shows.
+     *
+     * A finished agent is not gone — it can still be woken or asked a follow-up, which
+     * is the whole point of keeping it — but it is not work *in progress*, and the lane
+     * area answers "what is happening now". So the finished ones move to their own page
+     * instead of sitting in that list forever.
+     * @param {Record<string, any>[]} agents - board cards.
+     * @returns {{ active: Record<string, any>[], finished: Record<string, any>[] }} both groups, order preserved.
+     */
+    function partitionLanes(agents) {
+      const list = Array.isArray(agents) ? agents : []
+      const active = []
+      const finished = []
+      for (const card of list) {
+        if (TERMINAL_STATUSES.includes(card?.status)) finished.push(card)
+        else active.push(card)
+      }
+      return { active, finished }
     }
 
     /**
@@ -1510,6 +1537,8 @@ window.__ModuleLoader__.load({
       const [objective, setObjective] = React.useState('')
       const [editing, setEditing] = React.useState(false)
       const [openRows, setOpenRows] = React.useState({})
+      // Which lane surface is in front: work in progress, or the finished agents.
+      const [laneView, setLaneView] = React.useState('active')
       const state = board.state
       const phase = phaseOf(state)
       const live = phase === 'running' || phase === 'done'
@@ -1623,21 +1652,42 @@ window.__ModuleLoader__.load({
         h(BroadcastBox, { busy: board.busy, t, onSend: (text) => { void board.run('broadcast', { text }, t('sent')) } }),
       )
 
-      const lanes = h('div', { className: 'dsah-lanes' },
-        // The lead comes first: the board reads as "this conversation's agent, and
-        // the agents it put to work", which is what it is.
-        ...(state.lead === null || state.lead === undefined
-          ? []
-          : [h(AgentLane, {
-              key: 'lead', card: state.lead, now, t, busy: false, readonly: true,
-              open: openRows.lead === true, onToggle: toggleRow,
-              onAction: () => {}, onSteer: () => {},
-            })]),
-        ...state.agents.map(card => h(AgentLane, {
-          key: identityOf(card), card, now, t, busy: board.busy,
-          open: openRows[identityOf(card)] === true,
-          onToggle: toggleRow, onAction: laneAction, onSteer: laneSteer,
-        })),
+      // Two surfaces, not one list. A finished agent leaves the lane area — it is not
+      // happening now — and lands on the completed page, where it keeps every action:
+      // waking one to answer a follow-up is exactly what it is for.
+      const { active, finished } = partitionLanes(state.agents)
+      const showingFinished = laneView === 'done'
+      const shown = showingFinished ? finished : active
+      const laneArea = h('div', { className: 'dsah-col' },
+        h('div', { className: 'dsah-bar' },
+          h(Pill, { active: showingFinished !== true, onClick: () => { setLaneView('active') } },
+            t('laneActiveCount', { n: active.length })),
+          h(Pill, { active: showingFinished === true, onClick: () => { setLaneView('done') } },
+            t('laneFinishedCount', { n: finished.length })),
+          h('span', { className: 'dsah-spacer' }),
+          // Says out loud what the page is for, so "finished" does not read as "gone".
+          showingFinished === true && finished.length > 0
+            ? h('span', { className: 'dsah-cap' }, t('laneFinishedHint'))
+            : null,
+        ),
+        shown.length === 0 && (showingFinished === true || state.lead === null || state.lead === undefined)
+          ? h('div', { className: 'dsah-cap' }, showingFinished === true ? t('laneNoneFinished') : t('laneNoneActive'))
+          : null,
+        h('div', { className: 'dsah-lanes' },
+          // The lead belongs to the in-progress surface: it is never a finished agent.
+          ...(showingFinished === true || state.lead === null || state.lead === undefined
+            ? []
+            : [h(AgentLane, {
+                key: 'lead', card: state.lead, now, t, busy: false, readonly: true,
+                open: openRows.lead === true, onToggle: toggleRow,
+                onAction: () => {}, onSteer: () => {},
+              })]),
+          ...shown.map(card => h(AgentLane, {
+            key: identityOf(card), card, now, t, busy: board.busy,
+            open: openRows[identityOf(card)] === true,
+            onToggle: toggleRow, onAction: laneAction, onSteer: laneSteer,
+          })),
+        ),
       )
 
       const planArea = h('div', { className: 'dsah-col' },
@@ -1706,7 +1756,7 @@ window.__ModuleLoader__.load({
                 size: 'sm', icon: h(IconPlusOutlineMedium, null), onClick: () => { setEditing(true) },
               }, t('editing')),
             ),
-            lanes,
+            laneArea,
           ),
           feed,
         ),
@@ -1797,7 +1847,7 @@ window.__ModuleLoader__.load({
         // Extras the page itself needs; exported for the same reason. The stream
         // loop is here so its backoff schedule can be tested without a browser.
         draftRowFromCard, launchPayload, modelEntries, timeLabel, identityOf,
-        appendFeed, statusDot, segmentState, streamLoop, MAX_AGENTS,
+        appendFeed, statusDot, segmentState, streamLoop, MAX_AGENTS, partitionLanes,
       },
 
       /**

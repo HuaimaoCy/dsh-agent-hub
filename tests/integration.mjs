@@ -256,6 +256,35 @@ await check('lead 帧只更新主智能体，不会混进可派发名册', () =>
   assert.equal(next.agents.some(card => card.clientId === 'lead'), false)
   assert.equal(state.lead.activity, '', 'the previous state must not be mutated')
 })
+await check('泳道分成「进行中」与「已完成」两面', () => {
+  // The lane area answers "what is happening now", so a finished agent leaves it — but
+  // it is kept, not dropped, because the completed page is where it can still be woken.
+  // Order is preserved on both sides so the board does not reshuffle as agents settle.
+  const { active, finished } = helpers.partitionLanes([
+    { clientId: 'a1', status: 'running' },
+    { clientId: 'a2', status: 'done' },
+    { clientId: 'a3', status: 'idle' },
+    { clientId: 'a4', status: 'error' },
+    { clientId: 'a5', status: 'stopped' },
+    { clientId: 'a6', status: 'queued' },
+  ])
+  assert.deepEqual(active.map(card => card.clientId), ['a1', 'a3', 'a6'])
+  assert.deepEqual(finished.map(card => card.clientId), ['a2', 'a4', 'a5'])
+  assert.deepEqual(helpers.partitionLanes(undefined), { active: [], finished: [] })
+})
+await check('已完成页保留动作：终态卡片仍可被唤醒或插话', () => {
+  // The whole reason the completed page exists is that a finished agent can be called
+  // again. The only state that disables those controls is `draft`, so a rule that also
+  // gated on terminal status would silently turn that page read-only — which is exactly
+  // the edit this pins against.
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const definition = source.match(/const steerable = [^\n]+/)?.[0] ?? ''
+  assert.ok(definition !== '', 'the steerable rule must still be spelled out')
+  assert.ok(
+    !definition.includes('TERMINAL_STATUSES'),
+    `a finished agent must stay callable, but the rule says: ${definition}`,
+  )
+})
 await check('宿主发出的每个 status 浏览器半都有色调与文案', () => {
   // The union the Host half can produce, spelled out here on purpose: adding a
   // status host-side without teaching the panel about it is exactly the break

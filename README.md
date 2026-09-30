@@ -17,6 +17,9 @@ plugin merges *dispatch* and *watching* into one surface:
   Agent Teams, whose members carry a provider but **no per-teammate model**.
 - **Every agent visible at once.** Each lane shows status, model, elapsed time,
   token usage, the current step, and the **token-by-token text being written**.
+- **Two surfaces: in progress / finished.** The lane area lists only what is *happening
+  now*; finished agents (done / error / stopped) move to the completed page and **keep
+  their actions** — waking one to ask a follow-up is exactly what it is for.
 - **Progress genuinely exchanged.** Agents post milestones to a shared board with
   `hub_post`, and can hand a line straight into a peer's inbox to wake it; you can
   interject into any agent, broadcast to all, or interrupt one.
