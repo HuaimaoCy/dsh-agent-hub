@@ -93,7 +93,7 @@ const BUILTIN_META = {
   'codex-chatgpt/gpt-5.6-sol': { metered: false, tier: 'mid', quota: 'thin', strengths: '更早一代的主力（Older generation workhorse model）', boundaries: '订阅额度紧张' },
   'codex-chatgpt/gpt-5.6-terra': { metered: false, tier: 'mid', quota: 'thin', strengths: '较早的均衡模型（Older balanced model for straightforward work）', boundaries: '订阅额度紧张' },
   'codex-chatgpt/gpt-5.6-luna': { metered: false, tier: 'cheap', quota: 'thin', strengths: '较早的轻量模型（Older fast and efficient model）', boundaries: '订阅额度紧张，不要铺满整个团队' },
-  'codex-chatgpt/gpt-5.5': { metered: false, tier: 'cheap', quota: 'thin', strengths: '更早一代', boundaries: 'app-server 已把它标为 hidden，不会再出现在路由清单里' },
+  'codex-chatgpt/gpt-5.5': { metered: false, tier: 'cheap', quota: 'thin', strengths: '更早一代', boundaries: 'CLI 把它标为 hidden，但 app-server 的 model/list 仍会列出它——实测它就在路由清单里' },
   'codex-chatgpt': { metered: false, tier: 'high', quota: 'thin', strengths: '强判断', boundaries: '订阅额度紧张；清单里没见过的 codex 路由按最高档保守处理' },
 }
 
