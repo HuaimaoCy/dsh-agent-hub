@@ -958,6 +958,8 @@ export class Hub {
         status: agent.status,
         files: agent.files,
         id: agent.id,
+        // Verbatim: it decides whether this row's powers mean anything at all.
+        runtime: agent.runtime ?? null,
       })),
       feed: items.map(item => ({
         time: item.time,
@@ -1124,6 +1126,14 @@ export class Hub {
     if (typeof childId !== 'string' || childId === '') return
     const located = this.#locate(childId) ?? this.#adopt(childId)
     if (located === null || located.card === null) return
+    // Which runtime actually took this child. `provider` is the subagent provider the
+    // manager chose, and it is the only reliable way to tell an in-process child (which
+    // obeys this board's tool filter and powers) from an external one such as Codex —
+    // where our `write`/`shell` flags mean nothing and `hub_post` does not exist. The
+    // hub recorded the flag it *asked* for; this records what it got.
+    if (typeof info?.provider === 'string' && info.provider !== '') {
+      located.card.runtime = info.provider
+    }
     located.card.status = 'running'
     located.card.startedAt ??= Date.now()
     this.#emitAgent(located.board.sessionId, located.card)

@@ -1436,6 +1436,20 @@ await check('没有台时，派发会按需建台（否则先派子智能体的�
   assert.ok(response.payload.result.feed.some(item => item.text.includes('已加入协作台')))
 })
 
+await check('卡片记下实际运行它的 subagent provider', async () => {
+  // The hub records the powers it *asked* for; this records what it got. It is the only
+  // reliable way to tell an in-process child — where those flags are enforced — from an
+  // external one, where they are meaningless and hub_post does not exist at all.
+  harness.handlers.get('subagent/start')({
+    id: 'child-external', runId: 'r-ext', provider: 'codex', local: false,
+  })
+  const response = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=${sessionId}`)
+  const card = response.payload.result.agents.find(agent => agent.id === 'child-external')
+  assert.equal(card.runtime, 'codex')
+  const text = await harness.tools.registered.get('hub_read').execute({}, { agent: { session: { id: sessionId } } })
+  assert.match(text, /运行时 codex/, 'hub_read must say which runtime actually ran the agent')
+})
+
 console.log('\n实时流')
 await check('SSE 建连先发 snapshot，随后推送增量', async () => {
   const res = streamResponse()

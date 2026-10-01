@@ -104,7 +104,10 @@ export function formatBoard(view) {
   lines.push('', '队友：')
   for (const member of view.roster) {
     lines.push(`- ${member.name}（${member.status}）${member.role === '' ? '' : ` ${member.role}`}`
-      + `${member.files.length === 0 ? '' : ` · 负责 ${member.files.join(', ')}`}`)
+      + `${member.files.length === 0 ? '' : ` · 负责 ${member.files.join(', ')}`}`
+      // Stated verbatim, because it decides what the row's powers mean: an external
+      // runtime ignores this board's `write`/`shell` flags and has no `hub_post`.
+      + `${typeof member.runtime === 'string' && member.runtime !== '' ? ` · 运行时 ${member.runtime}` : ''}`)
   }
   lines.push('', `进度板（最近 ${view.feed.length} 条）：`)
   if (view.feed.length === 0) lines.push('- （还没有人汇报）')
