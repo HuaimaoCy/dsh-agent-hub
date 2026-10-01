@@ -66,6 +66,8 @@ const state = {
   startCalls: [],
   /** Live status per child id, as the runtime would report it (`child-*` defaults to running). */
   agentStatus: new Map(),
+  /** Fired from inside the mock's `startContinuable`, to reproduce the real ordering. */
+  onStartContinuable: null,
   promptCalls: [],
   interruptCalls: [],
   policySections: [],
@@ -139,7 +141,12 @@ const services = {
       state.startCalls.push(spec)
       if (state.startFail) throw new Error('provider refused to start')
       const index = state.startCalls.length
-      return { childId: `child-${index}`, messageId: `msg-${index}` }
+      const childId = `child-${index}`
+      // The real harness emits `subagent/start` *inside* this call, before it returns
+      // the child id — a test that sets this hook reproduces that ordering, which is
+      // what used to make the hub adopt its own freshly dispatched agent.
+      state.onStartContinuable?.(childId)
+      return { childId, messageId: `msg-${index}` }
     },
     prompt: async (request) => {
       state.promptCalls.push(request)
@@ -1072,6 +1079,51 @@ await check('跨会话的台互相不可见', async () => {
   const own = await request(route, 'GET', `${ROUTE_PATH}?op=state&sessionId=session-other`)
   assert.equal(own.payload.result.objective, '另一个对话的目标')
   assert.equal(own.payload.result.sessionId, 'session-other')
+})
+
+await check('协作台派发的智能体不会被认领成第二张卡片', async () => {
+  // `subagent/start` lands inside `startContinuable`, before the child id comes back, so
+  // the "is this child already ours?" check cannot see the card it belongs to. Adopting
+  // there produced a duplicate lane per hub-launched agent, and because adopted cards
+  // claim conservative powers that duplicate read as 只读 next to a 可写 original.
+  state.onStartContinuable = (childId) => {
+    harness.handlers.get('subagent/start')({ id: childId, runId: `run-${childId}`, provider: 'inproc', local: true })
+  }
+  try {
+    const response = await request(route, 'POST', `${ROUTE_PATH}?op=launch`, {
+      op: 'launch',
+      sessionId,
+      objective: '重复卡片探针',
+      agents: [{
+        name: '唯一',
+        role: '',
+        task: 't1',
+        files: [],
+        model: { provider: 'deepseek-official', model: 'deepseek-flash' },
+        powers: { write: true, shell: false, message: true },
+      }],
+    }, { [MARKER_HEADER]: '1' })
+    if (response.status !== 200) {
+      throw new Error(`duplicate-card probe: launch answered ${response.status} ${JSON.stringify(response.payload)}`)
+    }
+    const agents = response.payload.result.agents
+    // This board still holds adopted cards from earlier cases, so judge by what this
+    // launch produced rather than by the whole board. The snapshot goes into the error
+    // so a failure explains itself instead of just saying "not equal".
+    const childId = `child-${state.startCalls.length}`
+    const own = agents.filter(card => card.origin !== 'adopted')
+    const adopted = agents.filter(card => card.origin === 'adopted' && card.id === childId)
+    if (own.length !== 1 || own[0].name !== '唯一' || adopted.length !== 0 || own[0].powers.write !== true) {
+      throw new Error(`duplicate-card probe failed: ${JSON.stringify({
+        childId,
+        launched: own.map(card => ({ name: card.name, write: card.powers?.write })),
+        adoptedForThisChild: adopted.map(card => card.name),
+        board: agents.map(card => `${card.name}(${card.origin ?? 'launched'})`),
+      })}`)
+    }
+  } finally {
+    state.onStartContinuable = null
+  }
 })
 
 console.log('\n按提供商灵活调配')

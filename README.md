@@ -26,6 +26,14 @@ plugin merges *dispatch* and *watching* into one surface:
 - **Powers set per agent.** Read-only / may write files / may run commands,
   ticked in the UI. A read-only role is enforced with a tool whitelist — it truly
   cannot write, not merely asked not to.
+- **Codex routes are the exception (measured).** A child dispatched on
+  `codex-chatgpt/*` does **not** run inside DSH: it is an external Codex process whose
+  tools are Codex's own (`apply_patch`, `exec_command`, MCP apps). It has **no
+  `hub_post`/`hub_read` and none of DSH's file tools**, and its write access belongs to
+  Codex's own sandbox (`subagent-codex`'s `permissionMode` defaults to `never` →
+  read-only). In one launch, doing the same task: the deepseek child received 39 DSH
+  tools and its `write` landed, the codex child received neither. Send work that reads
+  files, reports to the board, or divides by file to an in-process route.
 
 It drives **real DSH subagent sessions** (with tools, workspace access and
 multi-turn continuation), not "several models each say a paragraph".

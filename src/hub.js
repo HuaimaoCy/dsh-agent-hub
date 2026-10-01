@@ -196,6 +196,8 @@ export class Hub {
   #warming = null
   /** Naming counter for adopted agents, kept apart from the `aN` launch ids. */
   #workerSeq = 0
+  /** Launches in flight; adoption stands down while one is running. */
+  #launching = 0
 
   /**
    * @param {{ ctx: Record<string, any>, settings: Record<string, any> }} options - Plugin context and normalized config.
@@ -589,21 +591,48 @@ export class Hub {
     this.#replaceAgents(board, launched)
     const roster = launched.map(card => ({ name: card.name, role: card.role, files: card.files }))
 
-    const results = await Promise.allSettled(launched.map(async (card) => {
-      const start = await subagents.startContinuable({
-        provider,
-        label: `${card.name}${card.role === '' ? '' : ` · ${card.role}`}`.slice(0, 120),
-        signal: payload.signal ?? new AbortController().signal,
-        request: {
-          parent,
-          prompt: [{ type: 'text', text: buildAgentPrompt(card, board.objective, roster) }],
-          ...(agentOptionsOf(card) === undefined ? {} : { agentOptions: agentOptionsOf(card) }),
+    // `launching` guards adoption while these spawns are in flight. `subagent/start`
+    // fires *inside* `startContinuable`, before it returns the child id, so at that
+    // moment our own card still has `id === null` and a naive "is this child already
+    // ours?" check misses — which produced a second, read-only card for every agent
+    // the hub itself dispatched. Genuine foreign children that appear in this window
+    // are picked up by the post-launch sweep.
+    this.#launching += 1
+    let results
+    try {
+      results = await Promise.allSettled(launched.map(async (card) => {
+        const start = await subagents.startContinuable({
+          provider,
+          label: `${card.name}${card.role === '' ? '' : ` · ${card.role}`}`.slice(0, 120),
+          signal: payload.signal ?? new AbortController().signal,
+          request: {
+            parent,
+            prompt: [{ type: 'text', text: buildAgentPrompt(card, board.objective, roster) }],
+            ...(agentOptionsOf(card) === undefined ? {} : { agentOptions: agentOptionsOf(card) }),
           persona: buildAgentPersona(card),
           ...(this.#toolFilter(card.powers) === undefined ? {} : { toolFilter: this.#toolFilter(card.powers) }),
         },
       })
       return { card, start }
     }))
+    } finally {
+      this.#launching -= 1
+    }
+
+    // Safety net: if a `subagent/start` still slipped through while the ids were
+    // unknown, the duplicate it created is an adopted card carrying the same child id.
+    // Drop it and repoint the child's event link at the card we actually launched.
+    const launchedIds = new Set(launched.filter(card => card.id !== null).map(card => card.id))
+    if (launchedIds.size > 0) {
+      const kept = board.agents.filter(card => card.origin !== 'adopted' || card.id === null || !launchedIds.has(card.id))
+      if (kept.length !== board.agents.length) {
+        board.agents = kept
+        for (const childId of launchedIds) {
+          const owner = launched.find(card => card.id === childId)
+          if (owner !== undefined) this.#children.set(childId, { sessionId, clientId: owner.clientId })
+        }
+      }
+    }
 
     for (const [index, result] of results.entries()) {
       const card = launched[index]
@@ -1323,6 +1352,12 @@ export class Hub {
    * @returns {{ board: Record<string, any>, card: Record<string, any> }|null} The adopted card, or null.
    */
   #adopt(childId) {
+    // A launch is in flight, so this child is almost certainly one of ours whose id has
+    // not come back yet: `subagent/start` fires inside `startContinuable`, and adopting
+    // then would add a second card for an agent the hub already has a card for. A
+    // genuinely foreign child that appears in this window is picked up by the sweep
+    // that runs when the launch finishes.
+    if (this.#launching > 0) return null
     const agents = this.ctx.get?.('agents')
     const agent = agents?.get?.(childId)
     const parentId = agent?.session?.header?.parentSession
